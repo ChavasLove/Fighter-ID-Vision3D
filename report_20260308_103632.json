@@ -1,0 +1,28 @@
+{
+  "version": "3.0",
+  "mode": "fight",
+  "generated": "2026-03-08T10:36:32.594055",
+  "rounds_done": 0,
+  "rounds": {
+    "1": {
+      "winner": "no_data",
+      "red_score": 0,
+      "blue_score": 0
+    },
+    "2": {
+      "winner": "no_data",
+      "red_score": 0,
+      "blue_score": 0
+    },
+    "3": {
+      "winner": "no_data",
+      "red_score": 0,
+      "blue_score": 0
+    }
+  },
+  "summary": {
+    "red_wins": 0,
+    "blue_wins": 0,
+    "winner": "Draw"
+  }
+}
