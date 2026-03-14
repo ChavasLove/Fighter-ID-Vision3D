@@ -285,6 +285,7 @@ def scan_all_cameras():
     candidates = []
     for i in range(MAX_CAMS):
         info = _probe_camera(i)
+        time.sleep(0.15)   # DirectShow necesita un momento para liberar el device
         if info is None: continue
         name = dev_names[i] if i < len(dev_names) else f"Camara {i}"
         info.update({'index': i, 'name': name}); candidates.append(info)
@@ -477,6 +478,36 @@ class InferThread(threading.Thread):
                     print(f"[{self.name}] CPU also failed: {e2}")
             self.last_latency_ms = (time.perf_counter() - t0) * 1000
             self.total_infers += 1
+
+# ══════════════════════════════════════════════════════════════════
+#  CAMERA READER THREAD
+# ══════════════════════════════════════════════════════════════════
+class CamReader(threading.Thread):
+    """Lee frames de una cámara continuamente en background.
+    El main loop obtiene el último frame disponible sin bloquearse."""
+    def __init__(self, cap):
+        super().__init__(daemon=True, name="CamReader")
+        self._cap   = cap
+        self._frame = None
+        self._lk    = threading.Lock()
+        self._go    = True
+
+    def read(self):
+        with self._lk:
+            f = self._frame
+        return (f is not None, f)
+
+    def stop(self):
+        self._go = False
+
+    def run(self):
+        while self._go:
+            ret, frame = self._cap.read()
+            if ret and frame is not None:
+                with self._lk:
+                    self._frame = frame
+            else:
+                time.sleep(0.005)
 
 # ══════════════════════════════════════════════════════════════════
 #  HELPERS
@@ -1183,6 +1214,13 @@ class VisionEngine(threading.Thread):
             self._log(f"ERROR: no se pudo abrir CAM A (idx={self.cam_a_idx})")
             inf_a.stop(); inf_b.stop(); inf_c.stop(); return
 
+        # Readers en background — el main loop no bloquea en cap.read()
+        rdr_a = CamReader(cap_a); rdr_a.start()
+        rdr_b = CamReader(cap_b) if cap_b else None
+        if rdr_b: rdr_b.start()
+        rdr_c = CamReader(cap_c) if cap_c else None
+        if rdr_c: rdr_c.start()
+
         # Load calibration if available
         calib = StereoCalibrator.load()
         if calib:
@@ -1199,14 +1237,10 @@ class VisionEngine(threading.Thread):
             self._log("Sin calibración — usando estimaciones por defecto")
 
         self._log("Calentando cámaras...")
-        for _ in range(3):
-            cap_a.read()
-            if cap_b: cap_b.read()
-            if cap_c: cap_c.read()
-            time.sleep(0.03)
+        time.sleep(0.4)  # dejar que los readers llenen el primer frame
 
         last_a = last_b = last_c = None
-        fc = 0; fc_c = 0; frame_c_cached = None
+        fc = 0; frame_c_cached = None
         use_tracking = False
         _scale  = CAM_W / 640
         GLOVE_R = max(8,  int(8  * _scale))
@@ -1216,7 +1250,7 @@ class VisionEngine(threading.Thread):
                   f"INFER={INFER_EVERY}  RES={CAM_W}x{CAM_H}")
 
         while self._go:
-            ret_a, frame_a = cap_a.read()
+            ret_a, frame_a = rdr_a.read()
             if not ret_a or frame_a is None:
                 _fail = getattr(self, '_cam_a_fail', 0) + 1
                 self._cam_a_fail = _fail
@@ -1229,15 +1263,13 @@ class VisionEngine(threading.Thread):
             self._cam_a_fail = 0
             frame_a = cv2.flip(frame_a, 1)
             frame_b = None
-            if cap_b:
-                ret_b, fb = cap_b.read()
+            if rdr_b:
+                ret_b, fb = rdr_b.read()
                 if ret_b and fb is not None: frame_b = cv2.flip(fb, 1)
             frame_c = None
-            if cap_c:
-                fc_c += 1
-                if fc_c % 2 == 0:
-                    ret_c, fr = cap_c.read()
-                    if ret_c and fr is not None: frame_c_cached = cv2.flip(fr, 1)
+            if rdr_c:
+                ret_c, fr = rdr_c.read()
+                if ret_c and fr is not None: frame_c_cached = cv2.flip(fr, 1)
                 frame_c = frame_c_cached
 
             fc += 1; ct = time.time()
@@ -1573,6 +1605,10 @@ class VisionEngine(threading.Thread):
                 self._stats   = stats
 
         inf_a.stop(); inf_b.stop(); inf_c.stop()
+        rdr_a.stop()
+        if rdr_b: rdr_b.stop()
+        if rdr_c: rdr_c.stop()
+        time.sleep(0.1)  # esperar que los readers salgan antes de liberar caps
         cap_a.release()
         if cap_b: cap_b.release()
         if cap_c: cap_c.release()
