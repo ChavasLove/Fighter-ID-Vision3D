@@ -266,7 +266,7 @@ def _probe_camera(idx):
     modelo (reinicialización del driver en secuencia rápida → frames vacíos).
     La resolución se configura al abrir la cámara en el engine (open_cap).
     """
-    for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW):   # CAP_ANY skipped – MSMF covers it on Win
+    for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY):
         cap = None
         try:
             cap = cv2.VideoCapture(idx, backend)
@@ -1515,31 +1515,60 @@ class VisionEngine(threading.Thread):
 
     def run(self):
         def open_cap(idx, fps=30):
-            for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW):   # CAP_ANY skipped – MSMF covers it on Win
+            """
+            Open camera at target resolution + fps.
+            Key: Razer Kiyo X (and most USB webcams) require FOURCC=MJPG to
+            reach 1080p@60fps.  At YUYV/raw the USB bandwidth caps at 30fps.
+            Order that works: FOURCC → WIDTH → HEIGHT → FPS → BUFFERSIZE.
+            """
+            for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY):
                 cap = None
                 try:
                     cap = cv2.VideoCapture(idx, backend)
                     if not cap.isOpened(): cap.release(); continue
-                    cap.read(); time.sleep(0.05)
-                    try: cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAM_W)
-                    except: pass
-                    try: cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
-                    except: pass
-                    try: cap.set(cv2.CAP_PROP_FPS, fps)
-                    except: pass
-                    try: cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    except: pass
+                    # Warmup read so the driver initialises fully
+                    cap.read(); time.sleep(0.08)
+                    # MJPEG is required for 60fps at 1080p on USB webcams
+                    if fps >= 60:
+                        cap.set(cv2.CAP_PROP_FOURCC,
+                                cv2.VideoWriter_fourcc(*'MJPG'))
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAM_W)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
+                    cap.set(cv2.CAP_PROP_FPS, fps)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    a_fps = cap.get(cv2.CAP_PROP_FPS)
+                    a_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    a_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    print(f"  [open_cap] idx={idx} bk={backend} "
+                          f"→ {a_w}x{a_h}@{a_fps:.0f}fps (req {fps}fps)")
                     return cap
                 except Exception as e:
                     print(f"  [open_cap] idx={idx} backend={backend}: {e}")
                     if cap:
                         try: cap.release()
                         except: pass
+            # Last-resort fallback (no settings — at least returns something)
+            print(f"  [open_cap] idx={idx} — todos los backends fallaron, abriendo sin config")
             return cv2.VideoCapture(idx)
 
         def fps_of(idx, default=30):
+            """
+            Return target FPS for camera at idx.
+            Razer Kiyo X supports 1080p@60fps via MJPEG — always request 60.
+            Logitech C920 is limited to 30fps at 1080p.
+            """
             for c in ALL_CAMERAS:
-                if c['index'] == idx: return min(c['fps'], 60)
+                if c['index'] != idx: continue
+                name = c.get('name', '').lower()
+                # Razer Kiyo X: 1080p@60fps confirmed hardware capability
+                if 'razer' in name or 'kiyo' in name:
+                    return 60
+                # Logitech C920: 1080p max 30fps
+                if 'c920' in name or 'logitech' in name:
+                    return 30
+                # Generic: trust what the probe reported, cap at 60
+                probe_fps = c.get('fps', default)
+                return 60 if probe_fps >= 55 else int(probe_fps) if probe_fps > 0 else default
             return default
 
         self._log(f"Cargando YOLO pose (device={_DEVICE})...")
