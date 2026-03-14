@@ -266,7 +266,7 @@ def _probe_camera(idx):
     modelo (reinicialización del driver en secuencia rápida → frames vacíos).
     La resolución se configura al abrir la cámara en el engine (open_cap).
     """
-    for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY):
+    for backend in (cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY):   # DSHOW first: stable indices on Win
         cap = None
         try:
             cap = cv2.VideoCapture(idx, backend)
@@ -1517,18 +1517,31 @@ class VisionEngine(threading.Thread):
         def open_cap(idx, fps=30):
             """
             Open camera at target resolution + fps.
-            Key: Razer Kiyo X (and most USB webcams) require FOURCC=MJPG to
-            reach 1080p@60fps.  At YUYV/raw the USB bandwidth caps at 30fps.
-            Order that works: FOURCC → WIDTH → HEIGHT → FPS → BUFFERSIZE.
+
+            Windows-specific notes:
+            - MSMF uses its own camera index mapping that can differ from
+              DirectShow.  'VideoCapture(1, MSMF)' may silently open cam 0
+              again.  We try DSHOW first — its indices match the OS/probe.
+            - Razer Kiyo X requires FOURCC=MJPG to reach 60fps at 1080p.
+              YUYV/raw saturates USB bandwidth and caps at 30fps.
+            - Property order: FOURCC → WIDTH → HEIGHT → FPS → BUFFERSIZE.
+            - After changing resolution the camera buffers stale frames;
+              flush with reads + sleep before returning.
             """
-            for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY):
+            # DSHOW first: consistent index mapping on Windows for USB webcams
+            # MSMF second: good for some built-ins
+            # CAP_ANY last: let OpenCV auto-select as last resort
+            backends = (cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY)
+            for backend in backends:
                 cap = None
                 try:
                     cap = cv2.VideoCapture(idx, backend)
-                    if not cap.isOpened(): cap.release(); continue
-                    # Warmup read so the driver initialises fully
-                    cap.read(); time.sleep(0.08)
-                    # MJPEG is required for 60fps at 1080p on USB webcams
+                    if not cap.isOpened():
+                        cap.release(); continue
+                    # Initial warmup — some cameras deliver black frames on first read
+                    for _ in range(3): cap.read()
+                    time.sleep(0.10)
+                    # MJPEG required for 60fps at 1080p on USB webcams
                     if fps >= 60:
                         cap.set(cv2.CAP_PROP_FOURCC,
                                 cv2.VideoWriter_fourcc(*'MJPG'))
@@ -1536,10 +1549,21 @@ class VisionEngine(threading.Thread):
                     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
                     cap.set(cv2.CAP_PROP_FPS, fps)
                     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    # Flush stale frames after resolution change
+                    for _ in range(5): cap.read()
+                    time.sleep(0.12)
                     a_fps = cap.get(cv2.CAP_PROP_FPS)
                     a_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                     a_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    print(f"  [open_cap] idx={idx} bk={backend} "
+                    # Sanity check: MSMF sometimes opens wrong camera
+                    # If we wanted 60fps but got 30, and backend is MSMF, reject
+                    if fps >= 60 and a_fps < 50 and backend == cv2.CAP_MSMF:
+                        print(f"  [open_cap] idx={idx} bk=MSMF devolvió {a_fps:.0f}fps "
+                              f"(req {fps}) — posible índice incorrecto, probando DSHOW")
+                        cap.release(); continue
+                    bk_name = {cv2.CAP_DSHOW:'DSHOW', cv2.CAP_MSMF:'MSMF',
+                               cv2.CAP_ANY:'ANY'}.get(backend, str(backend))
+                    print(f"  [open_cap] idx={idx} bk={bk_name} "
                           f"→ {a_w}x{a_h}@{a_fps:.0f}fps (req {fps}fps)")
                     return cap
                 except Exception as e:
@@ -1547,26 +1571,26 @@ class VisionEngine(threading.Thread):
                     if cap:
                         try: cap.release()
                         except: pass
-            # Last-resort fallback (no settings — at least returns something)
-            print(f"  [open_cap] idx={idx} — todos los backends fallaron, abriendo sin config")
-            return cv2.VideoCapture(idx)
+            # Last-resort: bare VideoCapture (no resolution/fps guarantees)
+            print(f"  [open_cap] idx={idx} — todos los backends fallaron, "
+                  f"abriendo sin config (resolución nativa)")
+            cap = cv2.VideoCapture(idx)
+            for _ in range(3): cap.read()
+            return cap
 
         def fps_of(idx, default=30):
             """
-            Return target FPS for camera at idx.
-            Razer Kiyo X supports 1080p@60fps via MJPEG — always request 60.
-            Logitech C920 is limited to 30fps at 1080p.
+            Target FPS for camera at idx, detected by model name.
+            Razer Kiyo X: 1080p@60fps (MJPEG).
+            Logitech C920: 1080p@30fps max.
             """
             for c in ALL_CAMERAS:
                 if c['index'] != idx: continue
                 name = c.get('name', '').lower()
-                # Razer Kiyo X: 1080p@60fps confirmed hardware capability
                 if 'razer' in name or 'kiyo' in name:
                     return 60
-                # Logitech C920: 1080p max 30fps
                 if 'c920' in name or 'logitech' in name:
                     return 30
-                # Generic: trust what the probe reported, cap at 60
                 probe_fps = c.get('fps', default)
                 return 60 if probe_fps >= 55 else int(probe_fps) if probe_fps > 0 else default
             return default
@@ -1612,8 +1636,8 @@ class VisionEngine(threading.Thread):
         else:
             self._log("Sin calibración — usando estimaciones por defecto")
 
-        self._log("Calentando cámaras...")
-        time.sleep(0.4)  # dejar que los readers llenen el primer frame
+        self._log("Calentando cámaras (1080p necesita ~1.5s)...")
+        time.sleep(1.5)  # 1080p USB webcams need time to stabilize after resolution change
 
         last_a = last_b = last_c = None
         fc = 0; frame_c_cached = None
