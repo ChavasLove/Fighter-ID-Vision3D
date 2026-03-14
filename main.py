@@ -289,22 +289,15 @@ def scan_all_cameras():
         name = dev_names[i] if i < len(dev_names) else f"Camara {i}"
         info.update({'index': i, 'name': name}); candidates.append(info)
         print(f"  [PROBE] [{i}] {name}  {info['w']}x{info['h']}@{info['fps']:.0f}fps")
-    groups: dict = {}
-    for c in candidates: groups.setdefault(c['name'], []).append(c)
-    selected = []
-    for name, cams in groups.items():
-        best    = max(cams, key=_res_score)
-        skipped = [c['index'] for c in cams if c['index'] != best['index']]
-        selected.append(best)
-        if skipped:
-            print(f"  [CAMO]  '{name}': usando idx={best['index']} "
-                  f"({best['w']}x{best['h']}), descartados={skipped}")
+    # Cada índice OpenCV = 1 dispositivo físico independiente.
+    # No se agrupa por nombre para no descartar cámaras del mismo modelo
+    # (p.ej. dos Razer Kiyo X) — se añade sufijo #2, #3 cuando se repite.
     name_count: dict = {}; found = []
-    for c in sorted(selected, key=lambda x: x['index']):
+    for c in sorted(candidates, key=lambda x: x['index']):
         base = c['name']; name_count[base] = name_count.get(base, 0) + 1
-        label = (f"[{c['index']}] {base}  {c['w']}x{c['h']}@{c['fps']:.0f}fps"
-                 if name_count[base] == 1 else
-                 f"[{c['index']}] {base} #{name_count[base]}  {c['w']}x{c['h']}@{c['fps']:.0f}fps")
+        display = base if name_count[base] == 1 else f"{base} #{name_count[base]}"
+        c['name'] = display
+        label = f"[{c['index']}] {display}  {c['w']}x{c['h']}@{c['fps']:.0f}fps"
         c['label'] = label; found.append(c)
         print(f"  [OK]    {label}")
     print(f"  → {len(found)} dispositivo(s) físico(s) detectado(s)\n")
