@@ -1595,6 +1595,7 @@ class VisionEngine(threading.Thread):
                 return 60 if probe_fps >= 55 else int(probe_fps) if probe_fps > 0 else default
             return default
 
+        print(f"[VisionEngine] iniciando A={self.cam_a_idx} B={self.cam_b_idx} C={self.cam_c_idx}")
         self._log(f"Cargando YOLO pose (device={_DEVICE})...")
         model = YOLO("yolov8n-pose.pt")
 
@@ -2038,10 +2039,16 @@ class VisionEngine(threading.Thread):
         rdr_a.stop()
         if rdr_b: rdr_b.stop()
         if rdr_c: rdr_c.stop()
-        time.sleep(0.1)  # esperar que los readers salgan antes de liberar caps
-        cap_a.release()
-        if cap_b: cap_b.release()
-        if cap_c: cap_c.release()
+        time.sleep(0.2)  # esperar que los readers salgan antes de liberar caps
+        try: cap_a.release()
+        except Exception as e: print(f"[cleanup] cap_a.release: {e}")
+        try:
+            if cap_b: cap_b.release()
+        except Exception as e: print(f"[cleanup] cap_b.release: {e}")
+        try:
+            if cap_c: cap_c.release()
+        except Exception as e: print(f"[cleanup] cap_c.release: {e}")
+        print(f"[VisionEngine] thread terminado (A={self.cam_a_idx} B={self.cam_b_idx} C={self.cam_c_idx})")
 
 # ══════════════════════════════════════════════════════════════════
 #  STAT CARD
@@ -2248,11 +2255,13 @@ class FighterIDApp(ctk.CTk):
                                      font=ctk.CTkFont(size=9), height=28,
                                      command=lambda v: self._on_cam_select('C',v))
         self._cb_c.pack(fill="x", padx=12, pady=2)
-        ctk.CTkButton(parent, text="⟳  APLICAR CÁMARAS", fg_color=GUI_PANEL,
+        self._apply_btn = ctk.CTkButton(
+                      parent, text="⟳  APLICAR CÁMARAS", fg_color=GUI_PANEL,
                       text_color=GUI_CYAN, border_color=GUI_CYAN, border_width=1,
                       hover_color=GUI_CARD, command=self._cmd_apply_cams,
                       corner_radius=7, height=30,
-                      font=ctk.CTkFont(size=10,weight="bold")).pack(fill="x", padx=12, pady=4)
+                      font=ctk.CTkFont(size=10,weight="bold"))
+        self._apply_btn.pack(fill="x", padx=12, pady=4)
         sep(); lbl("SESIÓN")
         ctk.CTkButton(parent, text="▶  INICIAR", fg_color=GUI_GREEN,
                       text_color=GUI_BG, hover_color="#28b84e",
@@ -2417,22 +2426,41 @@ class FighterIDApp(ctk.CTk):
         else: self._sel_c = idx
 
     def _cmd_apply_cams(self):
+        # Prevent double-click during startup
+        if hasattr(self, '_apply_btn'):
+            self._apply_btn.configure(state="disabled", text="⟳  Aplicando...")
+        self.update()
+
         if self._engine:
-            self._engine.cmd_stop(); time.sleep(0.4); self._engine = None
+            self._engine.cmd_stop()
+            # Join with timeout — ensures previous thread fully exits before
+            # opening cameras again (prevents cap.release() crash from 2 threads)
+            self._engine.join(timeout=5.0)
+            self._engine = None
+
         self._running = False
         if self._sel_a is None:
-            self._top_status.configure(text="⚠ CAM A es obligatoria", text_color=GUI_YELLOW); return
+            self._top_status.configure(text="⚠ CAM A es obligatoria", text_color=GUI_YELLOW)
+            if hasattr(self, '_apply_btn'):
+                self._apply_btn.configure(state="normal", text="⟳  APLICAR CÁMARAS")
+            return
         global INFER_EVERY
         try: INFER_EVERY = max(1, int(self._infer_entry.get()))
         except: pass
+
+        print(f"[GUI] APLICAR: sel_a={self._sel_a} sel_b={self._sel_b} sel_c={self._sel_c}")
         self._top_status.configure(
-            text=f"Iniciando v4.0: A={self._sel_a} B={self._sel_b} C={self._sel_c}",
+            text=f"Cargando YOLO + abriendo A={self._sel_a} B={self._sel_b} C={self._sel_c}...",
             text_color=GUI_GRAY)
         self.update()
         self._engine = VisionEngine(self._sel_a, self._sel_b, self._sel_c, DEFAULT_BASELINE)
         self._engine.start()
         self._running = True
         self.after(50, self._update_gui)
+        # Re-enable button after startup time (YOLO load + camera warmup ~10s)
+        self.after(12000, lambda: (
+            self._apply_btn.configure(state="normal", text="⟳  APLICAR CÁMARAS")
+            if hasattr(self, '_apply_btn') else None))
 
     def _update_gui(self):
         if not self._running or self._engine is None: return
