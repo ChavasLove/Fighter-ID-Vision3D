@@ -57,8 +57,8 @@ cv2.ocl.setUseOpenCL(False)
 #  CONFIG
 # ══════════════════════════════════════════════════════════════════
 ROUND_TIME       = 180;  REST_TIME        = 60;   TOTAL_ROUNDS     = 3
-INFER_IMGSZ      = 320;  INFER_EVERY      = 6;    INFER_CONF       = 0.40
-VOTE_WINDOW      = 30;   VOTE_NEEDED      = 10
+INFER_IMGSZ      = 320;  INFER_EVERY      = 3;    INFER_CONF       = 0.38
+VOTE_WINDOW      = 45;   VOTE_NEEDED      = 18
 PUNCH_SPD_THR_MS = 0.55; PUNCH_SPD_CAP_MS = 25.0
 EXTENSION_THR_M  = 0.14; RETRACTION_RATIO = 0.58
 MIN_PUNCH_DUR    = 0.05; MAX_PUNCH_DUR    = 0.70
@@ -241,7 +241,7 @@ def _get_device_names():
     return []
 
 def _probe_camera(idx, target_w=1920, target_h=1080):
-    for backend in (cv2.CAP_DSHOW, cv2.CAP_ANY):
+    for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY):
         cap = None
         try:
             cap = cv2.VideoCapture(idx, backend)
@@ -834,11 +834,19 @@ class Fighter:
                 vel3 = (dvx/dt, dvy/dt, dvz/dt)
         hl = len(hist)
         if hl >= 3:
-            rec=list(hist); sw=[]
+            # Velocidad y dirección windowed (2 segmentos) — consistentes entre sí
+            rec=list(hist); sw=[]; wvx=[]; wvy=[]; wvz=[]
             for a,b in ((rec[-3],rec[-2]),(rec[-2],rec[-1])):
                 dtw = b['time'] - a['time']
-                if dtw > 0.001: sw.append(dist3d(b['pos3d'],a['pos3d'])/dtw)
-            if sw: spd = float(np.mean(sw))
+                if dtw > 0.001:
+                    ddx=b['pos3d'][0]-a['pos3d'][0]
+                    ddy=b['pos3d'][1]-a['pos3d'][1]
+                    ddz=b['pos3d'][2]-a['pos3d'][2]
+                    sw.append(math.sqrt(ddx*ddx+ddy*ddy+ddz*ddz)/dtw)
+                    wvx.append(ddx/dtw); wvy.append(ddy/dtw); wvz.append(ddz/dtw)
+            if sw:
+                spd  = float(np.mean(sw))
+                vel3 = (float(np.mean(wvx)), float(np.mean(wvy)), float(np.mean(wvz)))
         spd = min(spd, PUNCH_SPD_CAP_MS)
         if spd > self.max_spd_ms: self.max_spd_ms = spd
         if ext > self.max_ext_m:  self.max_ext_m  = ext
@@ -907,12 +915,14 @@ class RoleDetector:
         for pid, d in self._wins.items():
             if pid in (self.test_pid, self.red_pid, self.blue_pid): continue
             wc=sum(d['W']); rc=sum(d['R']); bc=sum(d['B'])
+            # Modo test: torso sin guantes — NO bloquear, permite seguir detectando roles
             if wc>=VOTE_NEEDED and wc>=rc and wc>=bc:
                 if self.mode == "none":
-                    self.test_pid=pid; self.mode="test"; self.locked=True; return True
-            if rc>=VOTE_NEEDED and self.red_pid is None and self.mode!="test":
+                    self.test_pid=pid; self.mode="test"; return True
+            # Roles por color de guante — funcionan desde cualquier modo
+            if rc>=VOTE_NEEDED and self.red_pid is None:
                 self.red_pid=pid; self.mode="fight"
-            if bc>=VOTE_NEEDED and self.blue_pid is None and self.mode!="test":
+            if bc>=VOTE_NEEDED and self.blue_pid is None:
                 self.blue_pid=pid; self.mode="fight"
         if self.red_pid and self.blue_pid: self.locked = True
         return False
@@ -1168,7 +1178,7 @@ class VisionEngine(threading.Thread):
 
     def run(self):
         def open_cap(idx, fps=30):
-            for backend in (cv2.CAP_DSHOW, cv2.CAP_ANY):
+            for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY):
                 cap = None
                 try:
                     cap = cv2.VideoCapture(idx, backend)

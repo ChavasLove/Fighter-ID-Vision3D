@@ -96,12 +96,16 @@ def detect_cameras():
 
     for i in range(MAX_CAMS):
         try:
-            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            # Intentar MSMF primero — soporta múltiples cámaras del mismo modelo
+            cap = cv2.VideoCapture(i, cv2.CAP_MSMF)
             if not cap.isOpened():
-                cap.release(); continue
+                cap.release()
+                cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                cap.release(); time.sleep(0.15); continue
             ok, frame = cap.read()
             if not ok or frame is None:
-                cap.release(); continue
+                cap.release(); time.sleep(0.15); continue
 
             w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -112,6 +116,7 @@ def detect_cameras():
                 for _ in range(10): cap.read()
                 fps = round(10 / max(time.time() - t0, 0.001), 1)
             cap.release()
+            time.sleep(0.15)  # dejar que el driver limpie antes del próximo probe
 
             base_name = dev_names[i] if i < len(dev_names) else f"Camara {i}"
 
@@ -127,7 +132,7 @@ def detect_cameras():
                         'name': display_name, 'label': label})
             print(f"  [OK]  idx={i}  {label}")
         except:
-            pass
+            time.sleep(0.15)
 
     # Sin agrupamiento — cada índice OpenCV = 1 cámara
     # Ordenar por FPS descendente para poner las más fluidas primero
