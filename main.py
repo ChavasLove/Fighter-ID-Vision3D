@@ -1,5 +1,5 @@
 """
-FighterID Vision v4.0  –  3-Camera · GPU AMD · Hardened Pipeline
+FighterID Vision v4.1  –  3-Camera · GPU AMD · Hardened Pipeline
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 v3.6 → v4.0  Upgrade changelog:
   [1] Independent YOLO inference threads per camera (A, B, C)
@@ -54,11 +54,17 @@ cv2.setNumThreads(4)
 cv2.ocl.setUseOpenCL(False)
 
 # ══════════════════════════════════════════════════════════════════
+#  VERSION  —  actualizar en cada push significativo
+# ══════════════════════════════════════════════════════════════════
+BUILD_VERSION = "v4.1"
+BUILD_DATE    = "2026-03-14"          # YYYY-MM-DD del último push
+
+# ══════════════════════════════════════════════════════════════════
 #  CONFIG
 # ══════════════════════════════════════════════════════════════════
 ROUND_TIME       = 180;  REST_TIME        = 60;   TOTAL_ROUNDS     = 3
-INFER_IMGSZ      = 320;  INFER_EVERY      = 6;    INFER_CONF       = 0.40
-VOTE_WINDOW      = 30;   VOTE_NEEDED      = 10
+INFER_IMGSZ      = 320;  INFER_EVERY      = 3;    INFER_CONF       = 0.38
+VOTE_WINDOW      = 45;   VOTE_NEEDED      = 18
 PUNCH_SPD_THR_MS = 0.55; PUNCH_SPD_CAP_MS = 25.0
 EXTENSION_THR_M  = 0.14; RETRACTION_RATIO = 0.58
 MIN_PUNCH_DUR    = 0.05; MAX_PUNCH_DUR    = 0.70
@@ -240,20 +246,21 @@ def _get_device_names():
     except: pass
     return []
 
-def _probe_camera(idx, target_w=1920, target_h=1080):
-    for backend in (cv2.CAP_DSHOW, cv2.CAP_ANY):
+def _probe_camera(idx):
+    """
+    Detecta si existe una cámara en el índice dado.
+    NO fuerza resolución — solo verifica accesibilidad y lee a resolución nativa.
+    Forzar 1920x1080 durante el scan causa conflictos USB con cámaras del mismo
+    modelo (reinicialización del driver en secuencia rápida → frames vacíos).
+    La resolución se configura al abrir la cámara en el engine (open_cap).
+    """
+    for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY):
         cap = None
         try:
             cap = cv2.VideoCapture(idx, backend)
             if not cap.isOpened(): cap.release(); continue
-            cap.read(); time.sleep(0.05)
-            try: cap.set(cv2.CAP_PROP_FRAME_WIDTH,  target_w)
-            except: pass
-            try: cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_h)
-            except: pass
-            try: cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except: pass
-            for _ in range(3): cap.read()
+            # Dos lecturas de calentamiento sin cambiar nada
+            cap.read(); time.sleep(0.08); cap.read()
             ok, frame = cap.read()
             if not ok or frame is None: cap.release(); continue
             w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -261,12 +268,12 @@ def _probe_camera(idx, target_w=1920, target_h=1080):
             fps = cap.get(cv2.CAP_PROP_FPS)
             if fps <= 0 or fps > 240:
                 t0 = time.time()
-                for _ in range(8): cap.read()
-                fps = round(8 / max(time.time() - t0, 0.001), 1)
+                for _ in range(6): cap.read()
+                fps = round(6 / max(time.time() - t0, 0.001), 1)
             cap.release()
             return {'w': w, 'h': h, 'fps': fps}
         except Exception as e:
-            print(f"  [probe] idx={idx}: {e}")
+            print(f"  [probe] idx={idx} backend={backend}: {e}")
             if cap:
                 try: cap.release()
                 except: pass
@@ -281,30 +288,24 @@ def _res_score(c):
 
 def scan_all_cameras():
     dev_names = _get_device_names()
-    print(f"\nEscaneando cámaras 0..{MAX_CAMS-1}  (Camo/1080p mode)…")
+    print(f"\n[{BUILD_VERSION} {BUILD_DATE}] Escaneando cámaras 0..{MAX_CAMS-1}…")
     candidates = []
     for i in range(MAX_CAMS):
         info = _probe_camera(i)
+        time.sleep(0.25)   # Dar tiempo al driver USB de liberar completamente
         if info is None: continue
         name = dev_names[i] if i < len(dev_names) else f"Camara {i}"
         info.update({'index': i, 'name': name}); candidates.append(info)
         print(f"  [PROBE] [{i}] {name}  {info['w']}x{info['h']}@{info['fps']:.0f}fps")
-    groups: dict = {}
-    for c in candidates: groups.setdefault(c['name'], []).append(c)
-    selected = []
-    for name, cams in groups.items():
-        best    = max(cams, key=_res_score)
-        skipped = [c['index'] for c in cams if c['index'] != best['index']]
-        selected.append(best)
-        if skipped:
-            print(f"  [CAMO]  '{name}': usando idx={best['index']} "
-                  f"({best['w']}x{best['h']}), descartados={skipped}")
+    # Cada índice OpenCV = 1 dispositivo físico independiente.
+    # No se agrupa por nombre para no descartar cámaras del mismo modelo
+    # (p.ej. dos Razer Kiyo X) — se añade sufijo #2, #3 cuando se repite.
     name_count: dict = {}; found = []
-    for c in sorted(selected, key=lambda x: x['index']):
+    for c in sorted(candidates, key=lambda x: x['index']):
         base = c['name']; name_count[base] = name_count.get(base, 0) + 1
-        label = (f"[{c['index']}] {base}  {c['w']}x{c['h']}@{c['fps']:.0f}fps"
-                 if name_count[base] == 1 else
-                 f"[{c['index']}] {base} #{name_count[base]}  {c['w']}x{c['h']}@{c['fps']:.0f}fps")
+        display = base if name_count[base] == 1 else f"{base} #{name_count[base]}"
+        c['name'] = display
+        label = f"[{c['index']}] {display}  {c['w']}x{c['h']}@{c['fps']:.0f}fps"
         c['label'] = label; found.append(c)
         print(f"  [OK]    {label}")
     print(f"  → {len(found)} dispositivo(s) físico(s) detectado(s)\n")
@@ -484,6 +485,36 @@ class InferThread(threading.Thread):
                     print(f"[{self.name}] CPU also failed: {e2}")
             self.last_latency_ms = (time.perf_counter() - t0) * 1000
             self.total_infers += 1
+
+# ══════════════════════════════════════════════════════════════════
+#  CAMERA READER THREAD
+# ══════════════════════════════════════════════════════════════════
+class CamReader(threading.Thread):
+    """Lee frames de una cámara continuamente en background.
+    El main loop obtiene el último frame disponible sin bloquearse."""
+    def __init__(self, cap):
+        super().__init__(daemon=True, name="CamReader")
+        self._cap   = cap
+        self._frame = None
+        self._lk    = threading.Lock()
+        self._go    = True
+
+    def read(self):
+        with self._lk:
+            f = self._frame
+        return (f is not None, f)
+
+    def stop(self):
+        self._go = False
+
+    def run(self):
+        while self._go:
+            ret, frame = self._cap.read()
+            if ret and frame is not None:
+                with self._lk:
+                    self._frame = frame
+            else:
+                time.sleep(0.005)
 
 # ══════════════════════════════════════════════════════════════════
 #  HELPERS
@@ -810,11 +841,19 @@ class Fighter:
                 vel3 = (dvx/dt, dvy/dt, dvz/dt)
         hl = len(hist)
         if hl >= 3:
-            rec=list(hist); sw=[]
+            # Velocidad y dirección windowed (2 segmentos) — consistentes entre sí
+            rec=list(hist); sw=[]; wvx=[]; wvy=[]; wvz=[]
             for a,b in ((rec[-3],rec[-2]),(rec[-2],rec[-1])):
                 dtw = b['time'] - a['time']
-                if dtw > 0.001: sw.append(dist3d(b['pos3d'],a['pos3d'])/dtw)
-            if sw: spd = float(np.mean(sw))
+                if dtw > 0.001:
+                    ddx=b['pos3d'][0]-a['pos3d'][0]
+                    ddy=b['pos3d'][1]-a['pos3d'][1]
+                    ddz=b['pos3d'][2]-a['pos3d'][2]
+                    sw.append(math.sqrt(ddx*ddx+ddy*ddy+ddz*ddz)/dtw)
+                    wvx.append(ddx/dtw); wvy.append(ddy/dtw); wvz.append(ddz/dtw)
+            if sw:
+                spd  = float(np.mean(sw))
+                vel3 = (float(np.mean(wvx)), float(np.mean(wvy)), float(np.mean(wvz)))
         spd = min(spd, PUNCH_SPD_CAP_MS)
         if spd > self.max_spd_ms: self.max_spd_ms = spd
         if ext > self.max_ext_m:  self.max_ext_m  = ext
@@ -883,12 +922,14 @@ class RoleDetector:
         for pid, d in self._wins.items():
             if pid in (self.test_pid, self.red_pid, self.blue_pid): continue
             wc=sum(d['W']); rc=sum(d['R']); bc=sum(d['B'])
+            # Modo test: torso sin guantes — NO bloquear, permite seguir detectando roles
             if wc>=VOTE_NEEDED and wc>=rc and wc>=bc:
                 if self.mode == "none":
-                    self.test_pid=pid; self.mode="test"; self.locked=True; return True
-            if rc>=VOTE_NEEDED and self.red_pid is None and self.mode!="test":
+                    self.test_pid=pid; self.mode="test"; return True
+            # Roles por color de guante — funcionan desde cualquier modo
+            if rc>=VOTE_NEEDED and self.red_pid is None:
                 self.red_pid=pid; self.mode="fight"
-            if bc>=VOTE_NEEDED and self.blue_pid is None and self.mode!="test":
+            if bc>=VOTE_NEEDED and self.blue_pid is None:
                 self.blue_pid=pid; self.mode="fight"
         if self.red_pid and self.blue_pid: self.locked = True
         return False
@@ -1144,7 +1185,7 @@ class VisionEngine(threading.Thread):
 
     def run(self):
         def open_cap(idx, fps=30):
-            for backend in (cv2.CAP_DSHOW, cv2.CAP_ANY):
+            for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY):
                 cap = None
                 try:
                     cap = cv2.VideoCapture(idx, backend)
@@ -1190,6 +1231,13 @@ class VisionEngine(threading.Thread):
             self._log(f"ERROR: no se pudo abrir CAM A (idx={self.cam_a_idx})")
             inf_a.stop(); inf_b.stop(); inf_c.stop(); return
 
+        # Readers en background — el main loop no bloquea en cap.read()
+        rdr_a = CamReader(cap_a); rdr_a.start()
+        rdr_b = CamReader(cap_b) if cap_b else None
+        if rdr_b: rdr_b.start()
+        rdr_c = CamReader(cap_c) if cap_c else None
+        if rdr_c: rdr_c.start()
+
         # Load calibration if available
         calib = StereoCalibrator.load()
         if calib:
@@ -1206,24 +1254,21 @@ class VisionEngine(threading.Thread):
             self._log("Sin calibración — usando estimaciones por defecto")
 
         self._log("Calentando cámaras...")
-        for _ in range(3):
-            cap_a.read()
-            if cap_b: cap_b.read()
-            if cap_c: cap_c.read()
-            time.sleep(0.03)
+        time.sleep(0.4)  # dejar que los readers llenen el primer frame
 
         last_a = last_b = last_c = None
-        fc = 0; fc_c = 0; frame_c_cached = None
+        fc = 0; frame_c_cached = None
         use_tracking = False
         _scale  = CAM_W / 640
         GLOVE_R = max(8,  int(8  * _scale))
         HEAD_R  = max(12, int(16 * _scale))
 
-        self._log(f"v4.0 listo ✓  GPU={_DEVICE.upper()}  scipy={'YES' if _HAS_SCIPY else 'NO'} "
-                  f"INFER={INFER_EVERY}  RES={CAM_W}x{CAM_H}")
+        self._log(f"{BUILD_VERSION} [{BUILD_DATE}] listo ✓  GPU={_DEVICE.upper()}"
+                  f"  scipy={'YES' if _HAS_SCIPY else 'NO'}"
+                  f"  INFER={INFER_EVERY}  RES={CAM_W}x{CAM_H}")
 
         while self._go:
-            ret_a, frame_a = cap_a.read()
+            ret_a, frame_a = rdr_a.read()
             if not ret_a or frame_a is None:
                 _fail = getattr(self, '_cam_a_fail', 0) + 1
                 self._cam_a_fail = _fail
@@ -1236,15 +1281,13 @@ class VisionEngine(threading.Thread):
             self._cam_a_fail = 0
             frame_a = cv2.flip(frame_a, 1)
             frame_b = None
-            if cap_b:
-                ret_b, fb = cap_b.read()
+            if rdr_b:
+                ret_b, fb = rdr_b.read()
                 if ret_b and fb is not None: frame_b = cv2.flip(fb, 1)
             frame_c = None
-            if cap_c:
-                fc_c += 1
-                if fc_c % 2 == 0:
-                    ret_c, fr = cap_c.read()
-                    if ret_c and fr is not None: frame_c_cached = cv2.flip(fr, 1)
+            if rdr_c:
+                ret_c, fr = rdr_c.read()
+                if ret_c and fr is not None: frame_c_cached = cv2.flip(fr, 1)
                 frame_c = frame_c_cached
 
             fc += 1; ct = time.time()
@@ -1580,6 +1623,10 @@ class VisionEngine(threading.Thread):
                 self._stats   = stats
 
         inf_a.stop(); inf_b.stop(); inf_c.stop()
+        rdr_a.stop()
+        if rdr_b: rdr_b.stop()
+        if rdr_c: rdr_c.stop()
+        time.sleep(0.1)  # esperar que los readers salgan antes de liberar caps
         cap_a.release()
         if cap_b: cap_b.release()
         if cap_c: cap_c.release()

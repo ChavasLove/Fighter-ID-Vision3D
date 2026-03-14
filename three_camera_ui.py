@@ -1,5 +1,5 @@
 """
-FighterID Vision v3.2  –  3-Camera GUI Edition
+FighterID Vision v3.3  –  3-Camera GUI Edition
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 pip install customtkinter pillow ultralytics opencv-python numpy
 """
@@ -19,6 +19,12 @@ try:
 except ImportError:
     pass
 cv2.setNumThreads(3)
+
+# ══════════════════════════════════════════════════════════════════
+#  VERSION  —  actualizar en cada push significativo
+# ══════════════════════════════════════════════════════════════════
+BUILD_VERSION = "v3.3"
+BUILD_DATE    = "2026-03-14"          # YYYY-MM-DD del último push
 
 # ══════════════════════════════════════════════════════════════════
 #  CONFIG
@@ -87,7 +93,7 @@ def detect_cameras():
     Devuelve los primeros 3 encontrados ordenados por índice.
     """
     dev_names = _get_dshow_names()
-    print(f"\nDetectando cámaras...")
+    print(f"\n[{BUILD_VERSION} {BUILD_DATE}] Detectando cámaras...")
     if dev_names:
         print(f"  Dispositivos Windows ({len(dev_names)}): {', '.join(dev_names)}")
 
@@ -96,12 +102,19 @@ def detect_cameras():
 
     for i in range(MAX_CAMS):
         try:
-            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            # MSMF primero — maneja múltiples cámaras del mismo modelo (VID/PID)
+            # NO se fuerza resolución en el probe para evitar conflictos de driver USB
+            cap = cv2.VideoCapture(i, cv2.CAP_MSMF)
             if not cap.isOpened():
-                cap.release(); continue
+                cap.release()
+                cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                cap.release(); time.sleep(0.25); continue
+            # Calentamiento sin cambiar resolución
+            cap.read(); time.sleep(0.08)
             ok, frame = cap.read()
             if not ok or frame is None:
-                cap.release(); continue
+                cap.release(); time.sleep(0.25); continue
 
             w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -109,9 +122,10 @@ def detect_cameras():
             # Medir FPS empíricamente si el driver no reporta valor válido
             if fps <= 0 or fps > 240:
                 t0 = time.time()
-                for _ in range(10): cap.read()
-                fps = round(10 / max(time.time() - t0, 0.001), 1)
+                for _ in range(6): cap.read()
+                fps = round(6 / max(time.time() - t0, 0.001), 1)
             cap.release()
+            time.sleep(0.25)  # dejar que el driver USB libere completamente
 
             base_name = dev_names[i] if i < len(dev_names) else f"Camara {i}"
 
@@ -127,7 +141,7 @@ def detect_cameras():
                         'name': display_name, 'label': label})
             print(f"  [OK]  idx={i}  {label}")
         except:
-            pass
+            time.sleep(0.25)
 
     # Sin agrupamiento — cada índice OpenCV = 1 cámara
     # Ordenar por FPS descendente para poner las más fluidas primero
