@@ -56,7 +56,7 @@ cv2.ocl.setUseOpenCL(False)
 # ══════════════════════════════════════════════════════════════════
 #  VERSION  —  actualizar en cada push significativo
 # ══════════════════════════════════════════════════════════════════
-BUILD_VERSION = "v4.1"
+BUILD_VERSION = "v4.2"
 BUILD_DATE    = "2026-03-14"          # YYYY-MM-DD del último push
 
 # ══════════════════════════════════════════════════════════════════
@@ -74,8 +74,20 @@ DODGE_SPD_MS     = 0.40; HISTORY_LEN      = 20
 CAM_W, CAM_H     = 1920, 1080
 FOCAL_EST        = CAM_W * 0.8
 CX, CY           = CAM_W / 2, CAM_H / 2
-MAX_CAMS         = 10
+MAX_CAMS         = 6          # Reduced from 10 – typical desktop never exceeds 6 USB cams
+MAX_FOUND_CAMS   = 3          # Stop scan early once 3 cameras discovered
 DEFAULT_BASELINE = 1.50
+
+# ── Professional boxing biomechanical thresholds ────────────────
+# Research refs: McGill 2010, Loturco 2014, Filimonov 1985
+POWER_PUNCH_SPD_MS   = 2.0    # Wrist velocity threshold for "power punch" in scoring
+SCORING_PUNCH_SPD_MS = 1.0    # Minimum wrist speed to count as "clean punch"
+COMBO_WINDOW_S       = 1.8    # Max gap (s) between punches to count as a combination
+STANCE_THRESH_M      = 0.04   # Shoulder X-diff threshold for stance detection
+
+# Professional boxing punch type groups
+POWER_PUNCH_TYPES  = {"CROSS", "HOOK", "UPPERCUT", "OVERHAND"}
+SCORING_PUNCH_TYPES = {"JAB", "CROSS", "HOOK", "UPPERCUT", "OVERHAND", "BODYSHOT"}
 
 # FighterID Platform API
 FIGHTERID_API_URL = "https://api.fighterid.io/ai-strike-ingest/event"
@@ -238,7 +250,7 @@ def _get_device_names():
               "| ConvertTo-Json")
         out = subprocess.check_output(
             ["powershell", "-NoProfile", "-Command", ps],
-            timeout=6, stderr=subprocess.DEVNULL
+            timeout=3, stderr=subprocess.DEVNULL
         ).decode("utf-8", errors="ignore").strip()
         if out:
             data = json.loads(out)
@@ -254,7 +266,7 @@ def _probe_camera(idx):
     modelo (reinicialización del driver en secuencia rápida → frames vacíos).
     La resolución se configura al abrir la cámara en el engine (open_cap).
     """
-    for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY):
+    for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW):   # CAP_ANY skipped – MSMF covers it on Win
         cap = None
         try:
             cap = cv2.VideoCapture(idx, backend)
@@ -292,11 +304,20 @@ def scan_all_cameras():
     candidates = []
     for i in range(MAX_CAMS):
         info = _probe_camera(i)
-        time.sleep(0.25)   # Dar tiempo al driver USB de liberar completamente
-        if info is None: continue
+        if info is None:
+            time.sleep(0.04)  # brief settle on miss
+            # Early exit: all needed cameras already found + 1 miss
+            if len(candidates) >= MAX_FOUND_CAMS:
+                print(f"  → {MAX_FOUND_CAMS} cámaras encontradas, índice {i} vacío — scan completo")
+                break
+            continue
+        time.sleep(0.10)  # USB driver settle after successful open (was 0.25s)
         name = dev_names[i] if i < len(dev_names) else f"Camara {i}"
         info.update({'index': i, 'name': name}); candidates.append(info)
         print(f"  [PROBE] [{i}] {name}  {info['w']}x{info['h']}@{info['fps']:.0f}fps")
+        if len(candidates) >= MAX_FOUND_CAMS:
+            print(f"  → Máximo de cámaras ({MAX_FOUND_CAMS}) alcanzado — finalizando scan")
+            break
     # Cada índice OpenCV = 1 dispositivo físico independiente.
     # No se agrupa por nombre para no descartar cámaras del mismo modelo
     # (p.ej. dos Razer Kiyo X) — se añade sufijo #2, #3 cuando se repite.
@@ -537,6 +558,22 @@ def classify_glove(frame, x, y, r=None):
     bm = cv2.inRange(hsv, B_LO, B_HI); bm[wm] = 0; blue = int(np.sum(bm>0)) > mn
     return {'white': white, 'red': red, 'blue': blue}
 
+def detect_bare_hand(frame, x, y, r=None):
+    """
+    Returns True if the hand area looks like bare skin (no glove).
+    Used to gate fight-mode start — both fighters must have gloves.
+    """
+    if r is None: r = max(10, int(10 * CAM_W / 640))
+    h, w = frame.shape[:2]
+    roi = frame[max(0,y-r):min(h,y+r), max(0,x-r):min(w,x+r)]
+    if roi.size == 0: return False
+    small = cv2.resize(roi, (48, 48), interpolation=cv2.INTER_LINEAR)
+    hsv   = cv2.cvtColor(cv2.GaussianBlur(small, (5, 5), 0), cv2.COLOR_BGR2HSV)
+    mn    = max(15, int(48 * 48 * 0.08))
+    sm1   = cv2.inRange(hsv, SK1_LO, SK1_HI)
+    sm2   = cv2.inRange(hsv, SK2_LO, SK2_HI)
+    return int(np.sum(cv2.bitwise_or(sm1, sm2) > 0)) > mn
+
 def bare_torso(frame, kp):
     if len(kp) < 13: return False
     try:
@@ -574,6 +611,146 @@ def angle3pts(a, b, c):
     if n1 < 1e-6 or n2 < 1e-6: return 0.0
     cos_a = np.clip(np.dot(ba, bc) / (n1 * n2), -1.0, 1.0)
     return float(math.degrees(math.acos(cos_a)))
+
+# ══════════════════════════════════════════════════════════════════
+#  PROFESSIONAL BOXING SCORER  (IBF/WBC/WBA/WBO – 10-Must System)
+# ══════════════════════════════════════════════════════════════════
+class BoxingScorer:
+    """
+    Professional boxing round scoring aligned with IBF/WBC/WBA/WBO unified rules.
+
+    Criteria (ref: Unified Rules of Boxing, McGill 2010, CompuBox protocol):
+      1. Clean punches landed (face × 2.0, body × 1.0)
+      2. Power punches (cross, hook, uppercut, overhand)
+      3. Defense / ring generalship (slips/dodges, accuracy pressure)
+      4. Aggressiveness (forward pressure, punch output)
+    """
+
+    @staticmethod
+    def compute(fighter_stats: dict) -> dict:
+        """
+        Returns a rich scoring breakdown for one fighter in one round.
+        fighter_stats keys: strikes, connected, face_hits, body_hits,
+                            max_speed_ms, dodges, punch_types, aggression, agility
+        """
+        strikes   = fighter_stats.get('strikes', 0)
+        connected = fighter_stats.get('connected', 0)
+        face_hits = fighter_stats.get('face_hits', 0)
+        body_hits = fighter_stats.get('body_hits', 0)
+        dodges    = fighter_stats.get('dodges', 0)
+        max_spd   = fighter_stats.get('max_speed_ms', 0.0)
+        ptypes    = fighter_stats.get('punch_types', {})
+        aggr      = fighter_stats.get('aggression', 0)
+        agility   = fighter_stats.get('agility', 0.0)
+        power_str = fighter_stats.get('power_strikes', 0)
+
+        # ── 1. Clean punches ───────────────────────────────────────
+        clean_pts  = face_hits * 2 + body_hits   # face weighted 2×
+
+        # ── 2. Power punches ───────────────────────────────────────
+        power_typed = sum(ptypes.get(t, 0) for t in POWER_PUNCH_TYPES)
+        total_typed = max(sum(ptypes.values()), 1)
+        power_pct   = power_typed / total_typed * 100
+
+        # ── 3. Accuracy ────────────────────────────────────────────
+        accuracy = connected / max(strikes, 1) * 100
+
+        # ── 4. Defense ─────────────────────────────────────────────
+        defense_sc = min(dodges * 4.0 + agility * 0.2, 30.0)
+
+        # ── 5. Ring generalship (aggression + output) ──────────────
+        ring_sc = min(aggr * 0.4 + (strikes / 45.0) * 10, 20.0)
+
+        # ── 6. Speed bonus ─────────────────────────────────────────
+        speed_sc = min(max_spd * 1.8, 15.0)
+
+        # ── Composite score (raw, not normalized to 10) ────────────
+        raw = (clean_pts * 1.5 + power_pct * 0.35 + accuracy * 0.45
+               + defense_sc + ring_sc + speed_sc)
+
+        return {
+            'clean_punches_scored': clean_pts,
+            'power_punches': power_typed,
+            'power_pct': round(power_pct, 1),
+            'jabs': ptypes.get('JAB', 0),
+            'crosses': ptypes.get('CROSS', 0),
+            'hooks': ptypes.get('HOOK', 0),
+            'uppercuts': ptypes.get('UPPERCUT', 0),
+            'overhands': ptypes.get('OVERHAND', 0),
+            'body_shots': ptypes.get('BODYSHOT', 0),
+            'accuracy_pct': round(accuracy, 1),
+            'defense_score': round(defense_sc, 1),
+            'ring_generalship': round(ring_sc, 1),
+            'speed_bonus': round(speed_sc, 1),
+            'raw_score': round(raw, 2),
+        }
+
+    @staticmethod
+    def ten_must(raw_r: float, raw_b: float) -> tuple:
+        """
+        10-Must scoring system.
+        Returns (pts_red, pts_blue).
+        Dominant round (>15 pt gap in raw): 10-8.
+        Close/slight edge: 10-9.
+        Draw (<2 pt gap): 10-10.
+        """
+        diff = raw_r - raw_b
+        if abs(diff) < 2.0:
+            return 10, 10
+        if diff > 0:   # red wins
+            return 10, (8 if diff > 15 else 9)
+        else:          # blue wins
+            return (8 if abs(diff) > 15 else 9), 10
+
+    @staticmethod
+    def generate_scorecard_text(rnd: int, r_data: dict, b_data: dict,
+                                r_score: dict, b_score: dict,
+                                pts_r: int, pts_b: int) -> str:
+        """
+        CompuBox-style ASCII scorecard for one round.
+        """
+        winner_txt = ("EMPATE" if pts_r == pts_b
+                      else ("ROJO" if pts_r > pts_b else "AZUL"))
+
+        def col(d):
+            return (f"  Golpes lanzados : {d.get('strikes',0):>4}\n"
+                    f"  Golpes conectados: {d.get('connected',0):>4}  "
+                    f"({d.get('accuracy_pct', r_score.get('accuracy_pct',0)):.0f}%)\n"
+                    f"  Golpes de poder  : {r_score.get('power_punches',0) if d is r_data else b_score.get('power_punches',0):>4}  "
+                    f"({r_score.get('power_pct',0.0) if d is r_data else b_score.get('power_pct',0.0):.0f}%)\n"
+                    f"  Jabs / Cruces    : {(d.get('punch_types') or {}).get('JAB',0):>2} / "
+                    f"{(d.get('punch_types') or {}).get('CROSS',0):<2}\n"
+                    f"  Ganchos/Uppercuts: {(d.get('punch_types') or {}).get('HOOK',0):>2} / "
+                    f"{(d.get('punch_types') or {}).get('UPPERCUT',0):<2}\n"
+                    f"  Overhands / Body : {(d.get('punch_types') or {}).get('OVERHAND',0):>2} / "
+                    f"{(d.get('punch_types') or {}).get('BODYSHOT',0):<2}\n"
+                    f"  Cara / Cuerpo    : {d.get('face_hits',0):>2} / {d.get('body_hits',0):<2}\n"
+                    f"  Vel. máx.        : {d.get('max_speed_ms',0.0):>5.2f} m/s\n"
+                    f"  Esquivas         : {d.get('dodges',0):>4}\n"
+                    f"  Postura          : {d.get('stance','?')}")
+
+        r_col = col(r_data)
+        b_col = col(b_data)
+
+        lines = r_col.split('\n')
+        b_lines = b_col.split('\n')
+        # Side-by-side layout
+        sep = "  │  "
+        rows = []
+        for l, r in zip(lines, b_lines):
+            rows.append(f"{l:<38}{sep}{r}")
+
+        header = (f"\n{'═'*82}\n"
+                  f"  ROUND {rnd}  ─  TARJETA OFICIAL\n"
+                  f"{'─'*82}\n"
+                  f"  {'ESQUINA ROJA':<38}{'':3}{'ESQUINA AZUL'}\n"
+                  f"{'─'*82}\n")
+        footer = (f"\n{'─'*82}\n"
+                  f"  PUNTOS ROJO : {pts_r}          "
+                  f"PUNTOS AZUL : {pts_b}\n"
+                  f"  ★  GANADOR ROUND {rnd}: {winner_txt}  ({pts_r}-{pts_b})\n"
+                  f"{'═'*82}\n")
+        return header + "\n".join(rows) + footer
 
 SKELETON_PAIRS = [
     (5,6),(5,7),(7,9),(6,8),(8,10),
@@ -748,6 +925,15 @@ class Fighter:
         self.spd_history = deque(maxlen=60)
         # 3D keypoints for biomechanics (updated each frame)
         self.pts3d: dict = {}
+        # ── Professional boxing additions ──────────────────────────
+        self.power_strikes = 0          # punches classified as CROSS/HOOK/UPPERCUT/OVERHAND
+        self.stance: str   = "unknown"  # "orthodox" | "southpaw" | "unknown"
+        self.combo_count   = 0          # number of combinations thrown (≥2 punches within COMBO_WINDOW_S)
+        self._last_punch_t = 0.0        # timestamp of last punch (for combo detection)
+        self._in_combo     = False
+        self._combo_n      = 0          # consecutive punches in current combo
+        # glove status (bare=True means bare hand detected at wrist)
+        self.glove_detected = True      # default assume gloves until proven otherwise
 
     def reset(self):
         self.strikes = self.connected = self.aggr = self.face_hits = self.body_hits = 0
@@ -757,6 +943,24 @@ class Fighter:
         self.punchL = self.punchR = False; self.tL = self.tR = self.mL = self.mR = 0.0
         self.ptypes = {"JAB":0,"CROSS":0,"HOOK":0,"UPPERCUT":0,"OVERHAND":0,"BODYSHOT":0}
         self.head.reset(); self._lfht = 0.0; self.spd_history.clear()
+        self.power_strikes = 0; self.combo_count = 0
+        self._last_punch_t = 0.0; self._in_combo = False; self._combo_n = 0
+
+    def detect_stance(self):
+        """
+        Orthodox:  right shoulder further back (positive Z), left shoulder forward.
+        Southpaw:  left shoulder further back, right shoulder forward.
+        Uses shoulder X positions (lateral offset) as proxy.
+        """
+        ls, rs = self.pts3d.get(5), self.pts3d.get(6)
+        if ls is None or rs is None:
+            self.stance = "unknown"; return
+        diff = float(ls[2]) - float(rs[2])   # Z-axis depth difference L vs R
+        if diff < -STANCE_THRESH_M:
+            self.stance = "orthodox"
+        elif diff > STANCE_THRESH_M:
+            self.stance = "southpaw"
+        # else keep previous stance
 
     def accuracy(self):
         return round(self.connected / max(1, self.strikes) * 100, 1)
@@ -888,6 +1092,19 @@ class Fighter:
                     new_p=True; self.strikes+=1; self.aggr+=1
                     ptype = self._classify(wp3, sp3, left, av3, dur, cur)
                     if ptype in self.ptypes: self.ptypes[ptype] += 1
+                    # ── Power punch tracking ───────────────────────
+                    if ptype in POWER_PUNCH_TYPES:
+                        self.power_strikes += 1
+                    # ── Combination tracking ───────────────────────
+                    if t - self._last_punch_t <= COMBO_WINDOW_S:
+                        self._combo_n += 1
+                        if self._combo_n == 2:    # second punch = combo starts
+                            self.combo_count += 1
+                    else:
+                        self._combo_n = 1         # reset, this is first punch of new window
+                    self._last_punch_t = t
+                    # ── Stance update per punch ────────────────────
+                    self.detect_stance()
                     if left: self.punchL=False; self.mL=0.0
                     else:    self.punchR=False; self.mR=0.0
                 elif dur >= MAX_PUNCH_DUR:
@@ -1032,6 +1249,10 @@ class VisionEngine(threading.Thread):
         self._frame_a = self._frame_b = self._frame_c = None
         self._stats = {}; self._pids = []
         self._status_msg = "Muestra guantes + torso  |  asigna roles"
+        # Glove detection tracking per person (pid → bool)
+        self._glove_votes: dict = {}    # pid → deque of bool votes
+        self._glove_ok:    dict = {}    # pid → confirmed has glove
+        self._bare_warned  = False      # suppress repeat warnings
         self._log_msgs = deque(maxlen=20)
         self._fps_counter = deque(maxlen=30)
         self._pose_tracker = PoseTracker()
@@ -1095,10 +1316,16 @@ class VisionEngine(threading.Thread):
             if not lv and not rv: continue
             cL = classify_glove(frame, int(lx), int(ly)) if lv else {}
             cR = classify_glove(frame, int(rx), int(ry)) if rv else {}
+            bare_l = detect_bare_hand(frame, int(lx), int(ly)) if lv else False
+            bare_r = detect_bare_hand(frame, int(rx), int(ry)) if rv else False
+            any_glove = (cL.get('white',False) or cL.get('red',False) or cL.get('blue',False)
+                         or cR.get('white',False) or cR.get('red',False) or cR.get('blue',False))
             gi = {'white': cL.get('white',False) or cR.get('white',False),
                   'red':   cL.get('red',  False) or cR.get('red',  False),
                   'blue':  cL.get('blue', False) or cR.get('blue', False),
-                  'bare':  bare_torso(frame, kp)}
+                  'bare':  bare_torso(frame, kp),
+                  'bare_hands': (bare_l or bare_r) and not any_glove,
+                  'has_glove':  any_glove}
             persons.append((idx+pid_offset, kp, cf, gi))
         return persons
 
@@ -1111,35 +1338,138 @@ class VisionEngine(threading.Thread):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         with self._lock: self._log_msgs.append(f"[{ts}] {msg}")
 
+    def _build_fighter_stat_dict(self, ftr: 'Fighter') -> dict:
+        """Build a complete stats dict for one fighter (used in reports)."""
+        return {
+            "strikes":       ftr.strikes,
+            "connected":     ftr.connected,
+            "accuracy_pct":  ftr.accuracy(),
+            "face_hits":     ftr.face_hits,
+            "body_hits":     ftr.body_hits,
+            "max_speed_ms":  round(ftr.max_spd_ms, 2),
+            "max_ext_m":     round(ftr.max_ext_m, 3),
+            "dodges":        ftr.head.dodges,
+            "agility":       round(ftr.head.agility(), 1),
+            "aggression":    ftr.aggr,
+            "power_strikes": ftr.power_strikes,
+            "combo_count":   ftr.combo_count,
+            "stance":        ftr.stance,
+            "punch_types":   ftr.ptypes.copy(),
+        }
+
     def _end_round(self):
-        sc = self._score(self.red)
+        t_round_end = datetime.datetime.now().isoformat()
         if self.tm:
-            acc = self.red.connected/max(1,self.red.strikes)*100
+            # ── TEST MODE ─────────────────────────────────────────
+            acc = self.red.connected / max(1, self.red.strikes) * 100
+            sc  = self._score(self.red)
+            r_stats = self._build_fighter_stat_dict(self.red)
+            r_boxing = BoxingScorer.compute(r_stats)
             self.rnd_stats[self.rnd] = {
-                "mode":"test","strikes":self.red.strikes,
-                "connected":self.red.connected,"max_speed_ms":self.red.max_spd_ms,
-                "max_ext_m":self.red.max_ext_m,"score":sc,
-                "punch_types":self.red.ptypes.copy(),"accuracy":round(acc,1)}
-            self.rnd_winners[self.rnd] = "test"; self._reset_ts()
-            self._log(f"Round {self.rnd}: TEST — {self.red.strikes} golpes, {acc:.1f}%")
+                "mode": "test",
+                "timestamp": t_round_end,
+                "strikes": self.red.strikes,
+                "connected": self.red.connected,
+                "max_speed_ms": self.red.max_spd_ms,
+                "max_ext_m": self.red.max_ext_m,
+                "score": sc,
+                "punch_types": self.red.ptypes.copy(),
+                "accuracy": round(acc, 1),
+                "power_strikes": self.red.power_strikes,
+                "combo_count": self.red.combo_count,
+                "stance": self.red.stance,
+                "boxing_score": r_boxing,
+            }
+            self.rnd_winners[self.rnd] = "test"
+            self._reset_ts()
+            self._log(f"Round {self.rnd}: TEST — {self.red.strikes} golpes, {acc:.1f}%  "
+                      f"Poder:{self.red.power_strikes} Combos:{self.red.combo_count}")
+            self._emit_round_report(self.rnd, "test", None, t_round_end)
         else:
-            rs=self._score(self.red); bs=self._score(self.blue)
-            w="draw" if rs==bs else ("red" if rs>bs else "blue")
+            # ── FIGHT MODE (professional boxing scoring) ──────────
+            r_stats = self._build_fighter_stat_dict(self.red)
+            b_stats = self._build_fighter_stat_dict(self.blue)
+            r_boxing = BoxingScorer.compute(r_stats)
+            b_boxing = BoxingScorer.compute(b_stats)
+            pts_r, pts_b = BoxingScorer.ten_must(r_boxing['raw_score'], b_boxing['raw_score'])
+
+            if pts_r > pts_b:   w = "red"
+            elif pts_b > pts_r: w = "blue"
+            else:               w = "draw"
+
             self.rnd_winners[self.rnd] = w
             self.rnd_stats[self.rnd] = {
-                "winner":w,"red_score":rs,"blue_score":bs,
-                "red":{"strikes":self.red.strikes,"connected":self.red.connected,
-                       "face_hits":self.red.face_hits,"body_hits":self.red.body_hits,
-                       "max_speed_ms":self.red.max_spd_ms,"dodges":self.red.head.dodges,
-                       "punch_types":self.red.ptypes.copy()},
-                "blue":{"strikes":self.blue.strikes,"connected":self.blue.connected,
-                        "face_hits":self.blue.face_hits,"body_hits":self.blue.body_hits,
-                        "max_speed_ms":self.blue.max_spd_ms,"dodges":self.blue.head.dodges,
-                        "punch_types":self.blue.ptypes.copy()}}
-            self._log(f"Round {self.rnd}: ganador {w.upper()}")
+                "winner":     w,
+                "timestamp":  t_round_end,
+                "scorecard":  {"red": pts_r, "blue": pts_b},
+                "red_score":  r_boxing['raw_score'],
+                "blue_score": b_boxing['raw_score'],
+                "red":   {**r_stats, "boxing_score": r_boxing, "round_pts": pts_r},
+                "blue":  {**b_stats, "boxing_score": b_boxing, "round_pts": pts_b},
+            }
+            # Print CompuBox-style scorecard
+            card_txt = BoxingScorer.generate_scorecard_text(
+                self.rnd, r_stats, b_stats, r_boxing, b_boxing, pts_r, pts_b)
+            print(card_txt)
+            self._log(f"Round {self.rnd}: {w.upper()} ({pts_r}-{pts_b})  "
+                      f"R:{self.red.strikes}/{self.red.connected}  "
+                      f"B:{self.blue.strikes}/{self.blue.connected}")
+            self._emit_round_report(self.rnd, "fight", self.rnd_stats[self.rnd], t_round_end)
+
+    def _emit_round_report(self, rnd: int, mode: str, data: dict, ts: str):
+        """
+        Save a per-round JSON report to disk and log a compact summary.
+        File: round_report_<YYYYMMDD_HHMMSS>_R<N>.json
+        """
+        try:
+            fname = f"round_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_R{rnd}.json"
+            report = {
+                "version":   "1.0",
+                "system":    BUILD_VERSION,
+                "round":     rnd,
+                "mode":      mode,
+                "timestamp": ts,
+                "data":      data or self.rnd_stats.get(rnd, {}),
+                "session_summary": {
+                    "rounds_completed": self.rnd_done + 1,
+                    "total_rounds":     TOTAL_ROUNDS,
+                    "round_winners":    {str(k): v for k, v in self.rnd_winners.items()},
+                },
+            }
+            with open(fname, 'w', encoding='utf-8') as fp:
+                json.dump(report, fp, indent=2, ensure_ascii=False)
+            self._log(f"Reporte Round {rnd} → {fname}")
+        except Exception as e:
+            print(f"[report] Error guardando round report: {e}")
+
+    def _check_gloves_ready(self) -> tuple:
+        """
+        Returns (ok: bool, msg: str).
+        In FIGHT mode: both fighters must have confirmed gloves.
+        In TEST mode: allowed with or without gloves (training).
+        """
+        mode = self.roles.mode
+        if mode == "test":
+            return True, "TEST MODE – sin requisito de guantes"
+        if mode != "fight":
+            return False, "Asigna roles primero (ROJO + AZUL)"
+        rp = self.roles.red_pid; bp = self.roles.blue_pid
+        r_ok = self._glove_ok.get(rp, False)
+        b_ok = self._glove_ok.get(bp, False)
+        if r_ok and b_ok:
+            return True, "Guantes detectados en ambos peleadores ✓"
+        missing = []
+        if not r_ok: missing.append("ROJO sin guantes")
+        if not b_ok: missing.append("AZUL sin guantes")
+        return False, " | ".join(missing) + " — usa guantes para iniciar"
 
     def cmd_start(self):
         if not self.roles.ready: return False
+        gloves_ok, glove_msg = self._check_gloves_ready()
+        if not gloves_ok:
+            self._log(f"⚠ INICIO BLOQUEADO: {glove_msg}")
+            self._status_msg = glove_msg
+            return False
         self.session_state="RUNNING"; self.phase="ROUND"
         self.rnd=1; self.rnd_done=0
         self.t_start=time.time(); self.t_paused=0.0; self.t_pause=0.0
@@ -1185,7 +1515,7 @@ class VisionEngine(threading.Thread):
 
     def run(self):
         def open_cap(idx, fps=30):
-            for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY):
+            for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW):   # CAP_ANY skipped – MSMF covers it on Win
                 cap = None
                 try:
                     cap = cv2.VideoCapture(idx, backend)
@@ -1408,12 +1738,28 @@ class VisionEngine(threading.Thread):
                     w_ok=gi_a.get('white',False) and bare,
                     r_ok=gi_a.get('red',  False) and bare,
                     b_ok=gi_a.get('blue', False) and bare)
+                # ── Glove vote tracking (30-frame window) ─────────
+                has_g = gi_a.get('has_glove', False)
+                if pid_a not in self._glove_votes:
+                    self._glove_votes[pid_a] = deque(maxlen=30)
+                self._glove_votes[pid_a].append(has_g)
+                votes = self._glove_votes[pid_a]
+                self._glove_ok[pid_a] = sum(votes) >= max(8, len(votes) // 2)
             self.roles.try_confirm()
 
+            # ── Status message with glove awareness ───────────────
             if self.roles.mode == "test":
                 self._status_msg = "MODO TEST — Presiona INICIAR"
             elif self.roles.mode == "fight" and self.roles.red_pid and self.roles.blue_pid:
-                self._status_msg = "LUCHA LISTA — Presiona INICIAR"
+                rp_ok = self._glove_ok.get(self.roles.red_pid, False)
+                bp_ok = self._glove_ok.get(self.roles.blue_pid, False)
+                if rp_ok and bp_ok:
+                    self._status_msg = "✓ Guantes detectados — Presiona INICIAR"
+                else:
+                    miss = []
+                    if not rp_ok: miss.append("ROJO")
+                    if not bp_ok: miss.append("AZUL")
+                    self._status_msg = f"⚠ Sin guantes: {', '.join(miss)} — Pon guantes para iniciar"
             elif self.roles.red_pid:
                 self._status_msg = "Esperando esquina AZUL…"
             elif self.roles.blue_pid:
@@ -1590,6 +1936,9 @@ class VisionEngine(threading.Thread):
             hud(img_b, f"CAM B · DEPTH REF · lat={inf_b.last_latency_ms:.0f}ms", MAG)
             hud(img_c, f"CAM C · BROADCAST · lat={inf_c.last_latency_ms:.0f}ms", CYN)
 
+            # Pre-compute boxing scores for live display
+            r_bx = BoxingScorer.compute(self._build_fighter_stat_dict(self.red))
+            b_bx = BoxingScorer.compute(self._build_fighter_stat_dict(self.blue))
             stats = {
                 'rem':rem,'rnd':self.rnd,'phase':ph,'state':st,
                 'mode':self.roles.mode,'mode_tm':self.tm,
@@ -1603,6 +1952,11 @@ class VisionEngine(threading.Thread):
                     'max_spd':round(self.red.max_spd_ms,2),'max_ext':round(self.red.max_ext_m,2),
                     'agility':self.red.head.agility(),'dodges':self.red.head.dodges,
                     'score':round(self._score(self.red),1),'ptypes':dict(self.red.ptypes),
+                    'power_strikes':self.red.power_strikes,
+                    'combo_count':self.red.combo_count,
+                    'stance':self.red.stance,
+                    'boxing_score':r_bx,
+                    'glove_ok':self._glove_ok.get(self.roles.red_pid, False),
                 },
                 'blue':{
                     'strikes':self.blue.strikes,'connected':self.blue.connected,
@@ -1611,6 +1965,11 @@ class VisionEngine(threading.Thread):
                     'max_spd':round(self.blue.max_spd_ms,2),'max_ext':round(self.blue.max_ext_m,2),
                     'agility':self.blue.head.agility(),'dodges':self.blue.head.dodges,
                     'score':round(self._score(self.blue),1),'ptypes':dict(self.blue.ptypes),
+                    'power_strikes':self.blue.power_strikes,
+                    'combo_count':self.blue.combo_count,
+                    'stance':self.blue.stance,
+                    'boxing_score':b_bx,
+                    'glove_ok':self._glove_ok.get(self.roles.blue_pid, False),
                 },
                 'rnd_winners':dict(self.rnd_winners),
                 'n_3d':n_3d,'n_kp':n_total,'baseline':self.stereo_ab.B,
@@ -1757,7 +2116,7 @@ class FighterIDApp(ctk.CTk):
         super().__init__()
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
-        self.title("FighterID Vision v4.0  —  3-Camera · Kalman · Hungarian · Biomech")
+        self.title("FighterID Vision v4.2  —  3-Camera · Kalman · Hungarian · Pro Boxing")
         self.configure(fg_color=GUI_BG)
         sw=self.winfo_screenwidth(); sh=self.winfo_screenheight()
         self.geometry(f"{min(sw,1440)}x{min(sh,920)}+0+0")
@@ -1953,16 +2312,21 @@ class FighterIDApp(ctk.CTk):
         defs = [("strikes","GOLPES",""),("connected","HITS",""),
                 ("accuracy","PREC","%"),("face_hits","CARA",""),
                 ("body_hits","CUERPO",""),
-                ("max_spd","VEL MÁX","m/s"),("max_ext","EXT","m"),
+                ("max_spd","VEL MÁX","m/s"),("power_strikes","PODER",""),
                 ("agility","AGIL",""),("dodges","ESQV",""),("score","SCORE","")]
         cards = {}
         for i, (k, lb, unit) in enumerate(defs):
             c = StatCard(grid, lb, unit=unit, accent=color)
             c.grid(row=i//5, column=i%5, padx=2, pady=2, sticky="ew")
             grid.columnconfigure(i%5, weight=1); cards[k] = c
+        # Glove indicator label
+        glove_lbl = ctk.CTkLabel(f, text="⬜ SIN GUANTES",
+                                  font=ctk.CTkFont(size=9, weight="bold"),
+                                  text_color=GUI_ORANGE)
+        glove_lbl.pack(anchor="w", padx=10, pady=(0,1)); cards['_glove'] = glove_lbl
         tl = ctk.CTkLabel(f, text="", font=ctk.CTkFont("Courier New",9),
                            text_color=GUI_GRAY, justify="left")
-        tl.pack(anchor="w", padx=10, pady=(2,4)); cards['_tl'] = tl
+        tl.pack(anchor="w", padx=10, pady=(0,4)); cards['_tl'] = tl
         return cards
 
     def _init_cameras(self):
@@ -2043,13 +2407,24 @@ class FighterIDApp(ctk.CTk):
                                     text_color=GUI_CYAN if trk else GUI_GREEN)
             def upd(cards, data):
                 for k, c in cards.items():
-                    if k == '_tl': continue
+                    if k.startswith('_'): continue
                     c.set(data.get(k, '—'))
                 pt = data.get('ptypes', {})
+                bx = data.get('boxing_score', {})
+                stance = data.get('stance', '?')
+                combos = data.get('combo_count', 0)
+                pwr_pct = bx.get('power_pct', 0.0)
                 cards['_tl'].configure(
                     text=(f"J:{pt.get('JAB',0)} C:{pt.get('CROSS',0)} "
                           f"H:{pt.get('HOOK',0)} U:{pt.get('UPPERCUT',0)} "
-                          f"O:{pt.get('OVERHAND',0)} B:{pt.get('BODYSHOT',0)}"))
+                          f"O:{pt.get('OVERHAND',0)} B:{pt.get('BODYSHOT',0)}  "
+                          f"| Combos:{combos}  Poder:{pwr_pct:.0f}%  [{stance}]"))
+                # Glove indicator
+                glove_ok = data.get('glove_ok', False)
+                if glove_ok:
+                    cards['_glove'].configure(text="🥊 GUANTES OK", text_color=GUI_GREEN)
+                else:
+                    cards['_glove'].configure(text="⚠ SIN GUANTES", text_color=GUI_ORANGE)
             upd(self._rc, stats.get('red', {}))
             upd(self._bc, stats.get('blue', {}))
             rw = stats.get('rnd_winners', {})
@@ -2094,7 +2469,8 @@ class FighterIDApp(ctk.CTk):
         if not self._engine:
             self._top_status.configure(text="⚠ Aplica cámaras primero", text_color=GUI_YELLOW); return
         if not self._engine.cmd_start():
-            self._top_status.configure(text="⚠ Asigna roles primero", text_color=GUI_YELLOW)
+            msg = self._engine._status_msg or "⚠ Asigna roles y verifica guantes"
+            self._top_status.configure(text=msg, text_color=GUI_ORANGE)
 
     def _cmd_pause(self):
         if self._engine: self._engine.cmd_pause()
