@@ -1,5 +1,5 @@
 """
-FighterID Vision v4.0  –  3-Camera · GPU AMD · Hardened Pipeline
+FighterID Vision v4.1  –  3-Camera · GPU AMD · Hardened Pipeline
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 v3.6 → v4.0  Upgrade changelog:
   [1] Independent YOLO inference threads per camera (A, B, C)
@@ -52,6 +52,12 @@ except ImportError:
     pass
 cv2.setNumThreads(4)
 cv2.ocl.setUseOpenCL(False)
+
+# ══════════════════════════════════════════════════════════════════
+#  VERSION  —  actualizar en cada push significativo
+# ══════════════════════════════════════════════════════════════════
+BUILD_VERSION = "v4.1"
+BUILD_DATE    = "2026-03-14"          # YYYY-MM-DD del último push
 
 # ══════════════════════════════════════════════════════════════════
 #  CONFIG
@@ -240,20 +246,21 @@ def _get_device_names():
     except: pass
     return []
 
-def _probe_camera(idx, target_w=1920, target_h=1080):
+def _probe_camera(idx):
+    """
+    Detecta si existe una cámara en el índice dado.
+    NO fuerza resolución — solo verifica accesibilidad y lee a resolución nativa.
+    Forzar 1920x1080 durante el scan causa conflictos USB con cámaras del mismo
+    modelo (reinicialización del driver en secuencia rápida → frames vacíos).
+    La resolución se configura al abrir la cámara en el engine (open_cap).
+    """
     for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY):
         cap = None
         try:
             cap = cv2.VideoCapture(idx, backend)
             if not cap.isOpened(): cap.release(); continue
-            cap.read(); time.sleep(0.05)
-            try: cap.set(cv2.CAP_PROP_FRAME_WIDTH,  target_w)
-            except: pass
-            try: cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_h)
-            except: pass
-            try: cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except: pass
-            for _ in range(3): cap.read()
+            # Dos lecturas de calentamiento sin cambiar nada
+            cap.read(); time.sleep(0.08); cap.read()
             ok, frame = cap.read()
             if not ok or frame is None: cap.release(); continue
             w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -261,12 +268,12 @@ def _probe_camera(idx, target_w=1920, target_h=1080):
             fps = cap.get(cv2.CAP_PROP_FPS)
             if fps <= 0 or fps > 240:
                 t0 = time.time()
-                for _ in range(8): cap.read()
-                fps = round(8 / max(time.time() - t0, 0.001), 1)
+                for _ in range(6): cap.read()
+                fps = round(6 / max(time.time() - t0, 0.001), 1)
             cap.release()
             return {'w': w, 'h': h, 'fps': fps}
         except Exception as e:
-            print(f"  [probe] idx={idx}: {e}")
+            print(f"  [probe] idx={idx} backend={backend}: {e}")
             if cap:
                 try: cap.release()
                 except: pass
@@ -281,11 +288,11 @@ def _res_score(c):
 
 def scan_all_cameras():
     dev_names = _get_device_names()
-    print(f"\nEscaneando cámaras 0..{MAX_CAMS-1}  (Camo/1080p mode)…")
+    print(f"\n[{BUILD_VERSION} {BUILD_DATE}] Escaneando cámaras 0..{MAX_CAMS-1}…")
     candidates = []
     for i in range(MAX_CAMS):
         info = _probe_camera(i)
-        time.sleep(0.15)   # DirectShow necesita un momento para liberar el device
+        time.sleep(0.25)   # Dar tiempo al driver USB de liberar completamente
         if info is None: continue
         name = dev_names[i] if i < len(dev_names) else f"Camara {i}"
         info.update({'index': i, 'name': name}); candidates.append(info)
@@ -1256,8 +1263,9 @@ class VisionEngine(threading.Thread):
         GLOVE_R = max(8,  int(8  * _scale))
         HEAD_R  = max(12, int(16 * _scale))
 
-        self._log(f"v4.0 listo ✓  GPU={_DEVICE.upper()}  scipy={'YES' if _HAS_SCIPY else 'NO'} "
-                  f"INFER={INFER_EVERY}  RES={CAM_W}x{CAM_H}")
+        self._log(f"{BUILD_VERSION} [{BUILD_DATE}] listo ✓  GPU={_DEVICE.upper()}"
+                  f"  scipy={'YES' if _HAS_SCIPY else 'NO'}"
+                  f"  INFER={INFER_EVERY}  RES={CAM_W}x{CAM_H}")
 
         while self._go:
             ret_a, frame_a = rdr_a.read()
