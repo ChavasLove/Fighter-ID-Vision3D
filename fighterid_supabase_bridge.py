@@ -118,19 +118,24 @@ class FighterIDAPI:
     def _post(self, path, body, timeout=5):
         import main as m
         if not m.API_ENABLED or not m.FIGHTERID_API_KEY:
-            return False
+            return False, {}
         try:
             r = requests.post(f"{self._base_url()}/{path}", json=body, headers=self._headers(), timeout=timeout)
-            return r.status_code < 300
+            ok = r.status_code < 300
+            try:
+                data = r.json()
+            except Exception:
+                data = {}
+            return ok, data
         except Exception as e:
             print(f"[FighterIDAPI] POST /{path} error: {e}")
-            return False
+            return False, {}
 
     def _worker(self):
         while True:
             if not self._queue: time.sleep(0.02); continue
             evt = self._queue.popleft()
-            ok = self._post("event", evt)
+            ok, _ = self._post("event", evt)
             if ok: self.sent_ok  += 1
             else:  self.sent_err += 1
 
@@ -140,10 +145,12 @@ class FighterIDAPI:
             payload = self._session_queue.popleft()
             action  = payload.pop("_action", "")
             if action == "session_start":
-                ok = self._post("session/start", payload)
+                ok, data = self._post("start", payload)
+                if ok:
+                    self._session_id = data.get("sessionId") or data.get("session_id")
                 print(f"[FighterIDAPI] session/start {'OK' if ok else 'FAILED'}")
             elif action == "fight_end":
                 if payload.get("sessionId"):
-                    self._post("session/stop", {"sessionId": payload["sessionId"], "stats": payload.get("stats", {})})
-                ok = self._post("fight/end", payload, timeout=10)
+                    self._post("stop", {"sessionId": payload["sessionId"], "stats": payload.get("stats", {})})
+                ok, _ = self._post("end", payload, timeout=10)
                 print(f"[FighterIDAPI] fight/end {'OK' if ok else 'FAILED'} → winner={payload.get('winner_corner')}")
