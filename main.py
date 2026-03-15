@@ -112,12 +112,12 @@ W_S_MAX=55; W_V_MIN=160
 SK1_LO=np.array([0,20,60],np.uint8);   SK1_HI=np.array([25,210,255],np.uint8)
 SK2_LO=np.array([0,10,40],np.uint8);   SK2_HI=np.array([20,130,210],np.uint8)
 
-# GUI hex
-GUI_BG      = "#0d0d12"; GUI_PANEL   = "#13131a"; GUI_CARD    = "#1a1a24"
-GUI_BORDER  = "#2a2a3a"; GUI_RED     = "#e03030"; GUI_BLUE    = "#2080ff"
-GUI_CYAN    = "#00e5e5"; GUI_GREEN   = "#30e060"; GUI_YELLOW  = "#e0c020"
-GUI_MAGENTA = "#cc30cc"; GUI_WHITE   = "#e8e8f0"; GUI_GRAY    = "#505060"
-GUI_ORANGE  = "#ff8c00"; GUI_BLACK   = "#08080c"
+# GUI hex — sober, minimalist dark palette
+GUI_BG      = "#0a0a0f"; GUI_PANEL   = "#10101a"; GUI_CARD    = "#171720"
+GUI_BORDER  = "#222232"; GUI_RED     = "#c42830"; GUI_BLUE    = "#1a6ee0"
+GUI_CYAN    = "#00a8b8"; GUI_GREEN   = "#259645"; GUI_YELLOW  = "#b89010"
+GUI_MAGENTA = "#904090"; GUI_WHITE   = "#d0d0e0"; GUI_GRAY    = "#484858"
+GUI_ORANGE  = "#c86800"; GUI_BLACK   = "#060608"
 
 CALIB_FILE = "stereo_calib.json"
 
@@ -1246,6 +1246,7 @@ class VisionEngine(threading.Thread):
         self.rnd_stats = {}; self.rnd_winners = {}; self.opp_pos3d = {}
         self._ts = self._fresh_ts(); self._ts_t0 = 0.0
         self._go = True; self._lock = threading.Lock()
+        self._solo_frames = 0   # consecutive IDLE frames with exactly 1 person → auto test-mode
         self._frame_a = self._frame_b = self._frame_c = None
         self._stats = {}; self._pids = []
         self._status_msg = "Muestra guantes + torso  |  asigna roles"
@@ -1489,6 +1490,31 @@ class VisionEngine(threading.Thread):
         if self.session_state in ("RUNNING","PAUSED") and self.phase=="ROUND":
             self._end_round(); self.rnd_done+=1
 
+    def cmd_end_session(self):
+        """Terminate session early and emit reports for ALL rounds (played + skipped)."""
+        if self.session_state not in ("RUNNING", "PAUSED"):
+            return
+        # End current round if one is active
+        if self.phase == "ROUND":
+            self._end_round()
+            self.rnd_done += 1
+        # Emit skipped-round reports for rounds not yet played
+        ts_now = datetime.datetime.now().isoformat()
+        self.red.reset(); self.blue.reset()   # zero stats so skipped reports are clean
+        for r in range(self.rnd_done + 1, TOTAL_ROUNDS + 1):
+            skipped_data = {
+                "mode": "skipped",
+                "red":  self._build_fighter_stat_dict(self.red),
+                "blue": self._build_fighter_stat_dict(self.blue),
+            }
+            self.rnd_stats[r]   = skipped_data
+            self.rnd_winners[r] = "skipped"
+            self._emit_round_report(r, "skipped", skipped_data, ts_now)
+        if DATASET_ENABLED:
+            DATASET.stop_session()
+        self.session_state = "IDLE"; self.phase = "IDLE"
+        self._log("=== SESIÓN FINALIZADA (todos los reportes emitidos) ===")
+
     def cmd_force_test(self, pid=None):
         p = pid if pid is not None else (self._pids[0] if self._pids else 0)
         self.roles.force_test(p); self._log(f"Rol TEST → pid {p}")
@@ -1694,21 +1720,15 @@ class VisionEngine(threading.Thread):
             if r_b is not None: last_b = r_b
             if r_c is not None: last_c = r_c
 
-            # Kalman-smoothed keypoints via pose tracker
+            # Update pose tracker with fresh YOLO result when available
             if r_a is not None:
                 parsed = self._parse_result(r_a)
                 if parsed:
                     kp_list = [kp for kp, _ in parsed]
                     cf_list = [cf for _, cf in parsed]
                     self._pose_tracker.update_from_yolo(gray_a, kp_list, cf_list)
-                    current_kp_list = kp_list
-                    current_cf_list = cf_list
-                else:
-                    current_kp_list = current_cf_list = []
-            elif use_tracking:
-                current_kp_list, current_cf_list = self._pose_tracker.track(gray_a)
-            else:
-                current_kp_list = current_cf_list = []
+            # Always apply optical flow to current frame — eliminates 2-3 frame skeleton lag
+            current_kp_list, current_cf_list = self._pose_tracker.track(gray_a)
 
             img_a = frame_a.copy()
             img_b = frame_b.copy() if frame_b is not None else np.zeros((CAM_H,CAM_W,3), np.uint8)
@@ -1786,6 +1806,22 @@ class VisionEngine(threading.Thread):
             if new_pos3d: self.opp_pos3d = new_pos3d
 
             self._pids = [pid for pid,_,_,_ in persons_a]
+
+            # Auto test-mode: 1 fighter visible for ~2 s with no roles assigned yet
+            if (len(self._pids) == 1
+                    and self.roles.mode == "none"
+                    and not self.roles.locked
+                    and self.session_state == "IDLE"):
+                self._solo_frames += 1
+                if self._solo_frames >= 60:
+                    _ap = self._pids[0]
+                    self.roles.force_test(_ap)
+                    self._log(f"MODO TEST automático — 1 peleador detectado (pid={_ap})")
+                    self._solo_frames = 0
+            else:
+                if self.roles.mode == "none":
+                    self._solo_frames = 0
+
             for pid_a, kp_a, cf_a, gi_a in persons_a:
                 bare = gi_a.get('bare', False)
                 self.roles.update(pid_a,
@@ -1942,7 +1978,7 @@ class VisionEngine(threading.Thread):
                             if DATASET_ENABLED: DATASET.stop_session()
                             self.session_state="IDLE"; self.phase="IDLE"
                         else:
-                            self.phase="REST"; self.t_start=time.time()
+                            self.phase="REST"; self.t_start=time.time(); self.t_paused=0.0
                 else:
                     rem = max(0, int(REST_TIME - el))
                     if rem == 0:
@@ -2189,7 +2225,7 @@ class FighterIDApp(ctk.CTk):
     def _build_ui(self):
         top = ctk.CTkFrame(self, height=52, fg_color=GUI_PANEL, corner_radius=0)
         top.pack(fill="x", side="top"); top.pack_propagate(False)
-        ctk.CTkLabel(top, text="⬡  FIGHTER ID  v4.0",
+        ctk.CTkLabel(top, text="FIGHTER ID  v4.2",
                      font=ctk.CTkFont("Courier New",16,weight="bold"),
                      text_color=GUI_CYAN).pack(side="left", padx=18, pady=12)
         self._top_status = ctk.CTkLabel(top, text="Escaneando...",
@@ -2272,6 +2308,10 @@ class FighterIDApp(ctk.CTk):
         ctk.CTkButton(parent, text="⏹  FIN ROUND", fg_color=GUI_RED,
                       text_color=GUI_WHITE, hover_color="#b02020",
                       command=self._cmd_end, **B).pack(fill="x", padx=12, pady=2)
+        ctk.CTkButton(parent, text="⏏  FIN SESIÓN", fg_color="#200808",
+                      text_color=GUI_RED, border_color="#602020", border_width=1,
+                      hover_color="#2e0d0d",
+                      command=self._cmd_end_session, **B).pack(fill="x", padx=12, pady=2)
         sep(); lbl("ROLES")
         ctk.CTkButton(parent, text="⬜  TEST", fg_color=GUI_PANEL,
                       text_color=GUI_WHITE, border_color=GUI_BORDER, border_width=1,
@@ -2558,6 +2598,9 @@ class FighterIDApp(ctk.CTk):
 
     def _cmd_end(self):
         if self._engine: self._engine.cmd_end_round()
+
+    def _cmd_end_session(self):
+        if self._engine: self._engine.cmd_end_session()
 
     def _cmd_test(self):
         if self._engine: self._engine.cmd_force_test()
