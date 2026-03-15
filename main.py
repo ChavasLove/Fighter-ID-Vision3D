@@ -785,6 +785,70 @@ class BoxingScorer:
             'avg_raw':       round(avg, 2),
         }
 
+class AggressivenessScorer:
+    """
+    Scoring oficial para sesiones de pelea (ROJO vs AZUL).
+    Criterios: agresividad (presión, movimiento) + evasión (esquivas, agilidad).
+    Los conteos de golpes NO forman parte del puntaje para evitar discrepancias
+    con el arbitraje manual y la polémica en la comunidad.
+    """
+
+    @staticmethod
+    def compute(fighter_stats: dict) -> dict:
+        aggr    = fighter_stats.get('aggression', 0)
+        agility = fighter_stats.get('agility', 0.0)
+        dodges  = fighter_stats.get('dodges', 0)
+        max_spd = fighter_stats.get('max_speed_ms', 0.0)
+        # ── Agresividad: presión + actividad en el ring ────────────────
+        aggr_sc = min(aggr * 0.6 + max_spd * 1.5, 60.0)
+        # ── Evasión: movimiento de cabeza + índice de agilidad ─────────
+        evad_sc = min(dodges * 3.5 + agility * 0.4, 40.0)
+        raw = aggr_sc + evad_sc
+        return {
+            'aggr_score':    round(aggr_sc, 1),
+            'evasion_score': round(evad_sc, 1),
+            'raw_score':     round(raw, 2),
+        }
+
+    @staticmethod
+    def ten_must(raw_r: float, raw_b: float) -> tuple:
+        diff = raw_r - raw_b
+        if abs(diff) < 2.0: return 10, 10
+        if diff > 0: return 10, (8 if diff > 15 else 9)
+        else:        return (8 if abs(diff) > 15 else 9), 10
+
+    @staticmethod
+    def generate_scorecard_text(rnd: int, r_data: dict, b_data: dict,
+                                r_sc: dict, b_sc: dict,
+                                pts_r: int, pts_b: int) -> str:
+        winner_txt = ("EMPATE" if pts_r == pts_b
+                      else ("ROJO" if pts_r > pts_b else "AZUL"))
+
+        def col(data, sc):
+            return (f"  Agresividad      : {data.get('aggression',0):>4}  "
+                    f"(sc {sc.get('aggr_score',0):.1f})\n"
+                    f"  Velocidad máx.   : {data.get('max_speed_ms',0.0):>5.2f} m/s\n"
+                    f"  Evasiones        : {data.get('dodges',0):>4}  "
+                    f"(sc {sc.get('evasion_score',0):.1f})\n"
+                    f"  Agilidad         : {data.get('agility',0.0):>5.1f}\n"
+                    f"  Postura          : {data.get('stance','?')}")
+
+        lines   = col(r_data, r_sc).split('\n')
+        b_lines = col(b_data, b_sc).split('\n')
+        sep = "  │  "
+        rows = [f"{l:<38}{sep}{r}" for l, r in zip(lines, b_lines)]
+        header = (f"\n{'═'*82}\n"
+                  f"  ROUND {rnd}  ─  TARJETA OFICIAL  [MODO PELEA · Agresividad + Evasión]\n"
+                  f"{'─'*82}\n"
+                  f"  {'ESQUINA ROJA':<38}{sep}{'ESQUINA AZUL'}\n"
+                  f"{'─'*82}\n")
+        footer = (f"\n{'─'*82}\n"
+                  f"  PUNTOS ROJO : {pts_r}    PUNTOS AZUL : {pts_b}\n"
+                  f"  ★  GANADOR ROUND {rnd}: {winner_txt}  ({pts_r}-{pts_b})\n"
+                  f"{'═'*82}\n")
+        return header + "\n".join(rows) + footer
+
+
 SKELETON_PAIRS = [
     (5,6),(5,7),(7,9),(6,8),(8,10),
     (5,11),(6,12),(11,12),(11,13),(13,15),(12,14),(14,16),
@@ -1350,8 +1414,15 @@ class VisionEngine(threading.Thread):
     def tm(self): return self.roles.mode == "test"
 
     def _score(self, f):
-        if f.strikes == 0: return 0.0
-        return f.connected/max(1,f.strikes)*100 + f.aggr*0.2 + f.max_spd_ms*2
+        if self.tm:
+            # TEST mode: puntaje basado en golpes (boxeo completo)
+            if f.strikes == 0: return 0.0
+            return f.connected/max(1,f.strikes)*100 + f.aggr*0.2 + f.max_spd_ms*2
+        else:
+            # FIGHT mode: agresividad + evasión (sin conteo de golpes)
+            aggr_sc = min(f.aggr * 0.6 + f.max_spd_ms * 1.5, 60.0)
+            evad_sc = min(f.head.dodges * 3.5 + f.head.agility() * 0.4, 40.0)
+            return round(aggr_sc + evad_sc, 1)
 
     def _check_hit(self, wp3, pid):
         hb = hf = hbody = False
@@ -1466,12 +1537,12 @@ class VisionEngine(threading.Thread):
                       f"Poder:{self.red.power_strikes} Combos:{self.red.combo_count}")
             self._emit_round_report(self.rnd, "test", None, t_round_end)
         else:
-            # ── FIGHT MODE (professional boxing scoring) ──────────
+            # ── FIGHT MODE: Agresividad + Evasión (sin conteo de golpes) ──────────
             r_stats = self._build_fighter_stat_dict(self.red)
             b_stats = self._build_fighter_stat_dict(self.blue)
-            r_boxing = BoxingScorer.compute(r_stats)
-            b_boxing = BoxingScorer.compute(b_stats)
-            pts_r, pts_b = BoxingScorer.ten_must(r_boxing['raw_score'], b_boxing['raw_score'])
+            r_sc = AggressivenessScorer.compute(r_stats)
+            b_sc = AggressivenessScorer.compute(b_stats)
+            pts_r, pts_b = AggressivenessScorer.ten_must(r_sc['raw_score'], b_sc['raw_score'])
 
             if pts_r > pts_b:   w = "red"
             elif pts_b > pts_r: w = "blue"
@@ -1481,19 +1552,19 @@ class VisionEngine(threading.Thread):
             self.rnd_stats[self.rnd] = {
                 "winner":     w,
                 "timestamp":  t_round_end,
+                "scoring":    "aggressiveness+evasion",
                 "scorecard":  {"red": pts_r, "blue": pts_b},
-                "red_score":  r_boxing['raw_score'],
-                "blue_score": b_boxing['raw_score'],
-                "red":   {**r_stats, "boxing_score": r_boxing, "round_pts": pts_r},
-                "blue":  {**b_stats, "boxing_score": b_boxing, "round_pts": pts_b},
+                "red_score":  r_sc['raw_score'],
+                "blue_score": b_sc['raw_score'],
+                "red":   {**r_stats, "boxing_score": r_sc, "round_pts": pts_r},
+                "blue":  {**b_stats, "boxing_score": b_sc, "round_pts": pts_b},
             }
-            # Print CompuBox-style scorecard
-            card_txt = BoxingScorer.generate_scorecard_text(
-                self.rnd, r_stats, b_stats, r_boxing, b_boxing, pts_r, pts_b)
+            card_txt = AggressivenessScorer.generate_scorecard_text(
+                self.rnd, r_stats, b_stats, r_sc, b_sc, pts_r, pts_b)
             print(card_txt)
             self._log(f"Round {self.rnd}: {w.upper()} ({pts_r}-{pts_b})  "
-                      f"R:{self.red.strikes}/{self.red.connected}  "
-                      f"B:{self.blue.strikes}/{self.blue.connected}")
+                      f"Agres R:{self.red.aggr} B:{self.blue.aggr}  "
+                      f"Esqv R:{self.red.head.dodges} B:{self.blue.head.dodges}")
             self._emit_round_report(self.rnd, "fight", self.rnd_stats[self.rnd], t_round_end)
 
     def _emit_round_report(self, rnd: int, mode: str, data: dict, ts: str):
@@ -2207,9 +2278,13 @@ class VisionEngine(threading.Thread):
             hud(img_b, f"CAM B · DEPTH REF · lat={inf_b.last_latency_ms:.0f}ms", MAG)
             hud(img_c, f"CAM C · BROADCAST · lat={inf_c.last_latency_ms:.0f}ms", CYN)
 
-            # Pre-compute boxing scores for live display
-            r_bx = BoxingScorer.compute(self._build_fighter_stat_dict(self.red))
-            b_bx = BoxingScorer.compute(self._build_fighter_stat_dict(self.blue))
+            # Pre-compute live scores — usa el scorer correspondiente al modo
+            if self.tm:
+                r_bx = BoxingScorer.compute(self._build_fighter_stat_dict(self.red))
+                b_bx = BoxingScorer.compute(self._build_fighter_stat_dict(self.blue))
+            else:
+                r_bx = AggressivenessScorer.compute(self._build_fighter_stat_dict(self.red))
+                b_bx = AggressivenessScorer.compute(self._build_fighter_stat_dict(self.blue))
             stats = {
                 'rem':rem,'rnd':self.rnd,'phase':ph,'state':st,
                 'mode':self.roles.mode,'mode_tm':self.tm,
@@ -2222,7 +2297,9 @@ class VisionEngine(threading.Thread):
                     'accuracy':self.red.accuracy(),
                     'max_spd':round(self.red.max_spd_ms,2),'max_ext':round(self.red.max_ext_m,2),
                     'agility':self.red.head.agility(),'dodges':self.red.head.dodges,
-                    'score':round(self._score(self.red),1),'ptypes':dict(self.red.ptypes),
+                    'aggression':self.red.aggr,                           # nuevo
+                    'score':round(self._score(self.red),1),
+                    'ptypes':dict(self.red.ptypes),
                     'power_strikes':self.red.power_strikes,
                     'combo_count':self.red.combo_count,
                     'stance':self.red.stance,
@@ -2230,6 +2307,7 @@ class VisionEngine(threading.Thread):
                     'glove_ok':self._glove_ok.get(self.roles.red_pid, False),
                     'punch_balance':self.red.punch_balance(),
                     'kinetic_chain':self.red.kinetic_chain_avg(),
+                    'scoring_mode': 'test' if self.tm else 'fight',       # nuevo
                 },
                 'blue':{
                     'strikes':self.blue.strikes,'connected':self.blue.connected,
@@ -2237,7 +2315,9 @@ class VisionEngine(threading.Thread):
                     'accuracy':self.blue.accuracy(),
                     'max_spd':round(self.blue.max_spd_ms,2),'max_ext':round(self.blue.max_ext_m,2),
                     'agility':self.blue.head.agility(),'dodges':self.blue.head.dodges,
-                    'score':round(self._score(self.blue),1),'ptypes':dict(self.blue.ptypes),
+                    'aggression':self.blue.aggr,                          # nuevo
+                    'score':round(self._score(self.blue),1),
+                    'ptypes':dict(self.blue.ptypes),
                     'power_strikes':self.blue.power_strikes,
                     'combo_count':self.blue.combo_count,
                     'stance':self.blue.stance,
@@ -2245,6 +2325,7 @@ class VisionEngine(threading.Thread):
                     'glove_ok':self._glove_ok.get(self.roles.blue_pid, False),
                     'punch_balance':self.blue.punch_balance(),
                     'kinetic_chain':self.blue.kinetic_chain_avg(),
+                    'scoring_mode': 'test' if self.tm else 'fight',       # nuevo
                 },
                 'rnd_winners':dict(self.rnd_winners),
                 'n_3d':n_3d,'n_kp':n_total,'baseline':self.stereo_ab.B,
@@ -2584,7 +2665,7 @@ class FighterIDApp(ctk.CTk):
             lbl = ctk.CTkLabel(f, text="", fg_color=GUI_BLACK)
             lbl.pack(fill="both", expand=True, padx=4, pady=(0,4))
             self._cam_lbls.append(lbl)
-        stats_bar = ctk.CTkFrame(parent, fg_color=GUI_PANEL, height=180, corner_radius=0)
+        stats_bar = ctk.CTkFrame(parent, fg_color=GUI_PANEL, height=220, corner_radius=0)
         stats_bar.pack(fill="x"); stats_bar.pack_propagate(False)
         info = ctk.CTkFrame(stats_bar, fg_color="transparent", height=32)
         info.pack(fill="x", padx=14, pady=(6,0)); info.pack_propagate(False)
@@ -2608,23 +2689,29 @@ class FighterIDApp(ctk.CTk):
         ctk.CTkLabel(f, text=f"● {title}",
                      font=ctk.CTkFont(size=11,weight="bold"), text_color=color
                      ).pack(anchor="w", padx=8, pady=(4,2))
+        # indicador de modo de puntuación (se actualiza desde _update_gui)
+        mode_lbl = ctk.CTkLabel(f, text="MODO PELEA  ·  Agresividad + Evasión",
+                                font=ctk.CTkFont(size=8, weight="bold"),
+                                text_color=GUI_GRAY)
+        mode_lbl.pack(anchor="w", padx=10, pady=(0,3))
         grid = ctk.CTkFrame(f, fg_color="transparent"); grid.pack(fill="x", padx=4)
         defs = [("strikes","GOLPES",""),("connected","HITS",""),
                 ("accuracy","PREC","%"),("face_hits","CARA",""),
                 ("body_hits","CUERPO",""),
-                ("max_spd","VEL MÁX","m/s"),("power_strikes","PODER",""),
+                ("max_spd","VEL MÁX","m/s"),("aggression","AGRES",""),
                 ("agility","AGIL",""),("dodges","ESQV",""),("score","SCORE","")]
         cards = {}
         for i, (k, lb, unit) in enumerate(defs):
             c = StatCard(grid, lb, unit=unit, accent=color)
             c.grid(row=i//5, column=i%5, padx=2, pady=2, sticky="ew")
             grid.columnconfigure(i%5, weight=1); cards[k] = c
+        cards['_mode'] = mode_lbl   # guardar referencia al modo label
         # Glove indicator label
         glove_lbl = ctk.CTkLabel(f, text="⬜ SIN GUANTES",
                                   font=ctk.CTkFont(size=9, weight="bold"),
                                   text_color=GUI_ORANGE)
         glove_lbl.pack(anchor="w", padx=10, pady=(0,1)); cards['_glove'] = glove_lbl
-        tl = ctk.CTkLabel(f, text="", font=ctk.CTkFont("Courier New",11),
+        tl = ctk.CTkLabel(f, text="", font=ctk.CTkFont("Courier New",10),
                            text_color=GUI_GRAY, justify="left")
         tl.pack(anchor="w", padx=10, pady=(0,4)); cards['_tl'] = tl
         return cards
@@ -2702,7 +2789,10 @@ class FighterIDApp(ctk.CTk):
             if hasattr(self, '_apply_btn') else None))
 
     def _update_cam_titles(self):
-        """Actualiza los encabezados de las 3 vistas con el índice y nombre real del dispositivo."""
+        """Actualiza los encabezados de las 3 vistas con el índice y nombre real del dispositivo.
+        Muestra la RESOLUCIÓN OBJETIVO (1920×1080) y el FPS OBJETIVO (detectado por nombre de modelo),
+        no los valores del probe que reflejan la resolución nativa sin configurar del driver.
+        """
         cam_map = {c['index']: c for c in ALL_CAMERAS}
         roles   = ["IA + KALMAN", "DEPTH REF", "BROADCAST"]
         letters = ["A", "B", "C"]
@@ -2712,12 +2802,19 @@ class FighterIDApp(ctk.CTk):
             if idx is not None and idx in cam_map:
                 c    = cam_map[idx]
                 name = c.get('name', f'Cámara {idx}')
-                fps  = int(round(c.get('fps', 0)))
-                w, h = c.get('w', 0), c.get('h', 0)
+                # Detectar FPS objetivo por nombre de modelo (misma lógica que fps_of() en el engine)
+                name_l = name.lower()
+                if 'razer' in name_l or 'kiyo' in name_l:
+                    target_fps = 60
+                elif 'c920' in name_l or 'logitech' in name_l:
+                    target_fps = 30
+                else:
+                    probe_fps = c.get('fps', 0)
+                    target_fps = 60 if probe_fps >= 55 else (int(probe_fps) if probe_fps > 0 else 60)
                 self._cam_title_lbls[i].configure(
                     text=f"CAM {letter}  ·  {role}")
                 self._cam_info_lbls[i].configure(
-                    text=f"[{idx}] {name}   {w}×{h}  {fps}fps",
+                    text=f"[{idx}] {name}   1920×1080  @  {target_fps}fps",
                     text_color=color)
             else:
                 self._cam_title_lbls[i].configure(
@@ -2749,24 +2846,44 @@ class FighterIDApp(ctk.CTk):
             trk = stats.get('tracking', False)
             self._trk_lbl.configure(text="TRK" if trk else "YLO",
                                     text_color=GUI_CYAN if trk else GUI_GREEN)
+            is_test = stats.get('mode_tm', False)
             def upd(cards, data):
                 for k, c in cards.items():
                     if k.startswith('_'): continue
                     c.set(data.get(k, '—'))
-                pt = data.get('ptypes', {})
-                bx = data.get('boxing_score', {})
                 stance = data.get('stance', '?')
-                combos = data.get('combo_count', 0)
-                pwr_pct = bx.get('power_pct', 0.0)
-                bal = data.get('punch_balance', 0.0)
-                kc  = data.get('kinetic_chain', 0.0)
-                cards['_tl'].configure(
-                    text=(f"J:{pt.get('JAB',0)} C:{pt.get('CROSS',0)} "
-                          f"H:{pt.get('HOOK',0)} U:{pt.get('UPPERCUT',0)} "
-                          f"O:{pt.get('OVERHAND',0)} B:{pt.get('BODYSHOT',0)}  "
-                          f"| Combos:{combos}  Poder:{pwr_pct:.0f}%  [{stance}]  "
-                          f"Bal:{bal:.2f}  KC:{kc:.2f}"))
-                # Glove indicator
+                bx     = data.get('boxing_score', {})
+                # ── Modo label ──────────────────────────────────────
+                if is_test:
+                    cards['_mode'].configure(
+                        text="MODO PRUEBA  ·  Golpes + Agresividad (guantes blancos)",
+                        text_color=GUI_CYAN)
+                else:
+                    cards['_mode'].configure(
+                        text="MODO PELEA  ·  Agresividad + Evasión",
+                        text_color=GUI_GRAY)
+                # ── Línea de detalle inferior ───────────────────────
+                if is_test:
+                    pt     = data.get('ptypes', {})
+                    combos = data.get('combo_count', 0)
+                    pwr_pct = bx.get('power_pct', 0.0)
+                    bal = data.get('punch_balance', 0.0)
+                    kc  = data.get('kinetic_chain', 0.0)
+                    cards['_tl'].configure(
+                        text=(f"J:{pt.get('JAB',0)} C:{pt.get('CROSS',0)} "
+                              f"H:{pt.get('HOOK',0)} U:{pt.get('UPPERCUT',0)} "
+                              f"O:{pt.get('OVERHAND',0)} B:{pt.get('BODYSHOT',0)}  "
+                              f"| Combos:{combos}  Poder:{pwr_pct:.0f}%  [{stance}]  "
+                              f"Bal:{bal:.2f}  KC:{kc:.2f}"))
+                else:
+                    aggr_sc = bx.get('aggr_score', 0.0)
+                    evad_sc = bx.get('evasion_score', 0.0)
+                    cards['_tl'].configure(
+                        text=(f"Agresividad: {data.get('aggression',0)}  "
+                              f"(sc {aggr_sc:.1f})  |  "
+                              f"Evasiones: {data.get('dodges',0)}  Ágil: {data.get('agility',0.0):.1f}  "
+                              f"(sc {evad_sc:.1f})  |  Postura: [{stance}]"))
+                # ── Glove indicator ─────────────────────────────────
                 glove_ok = data.get('glove_ok', False)
                 if glove_ok:
                     cards['_glove'].configure(text="🥊 GUANTES OK", text_color=GUI_GREEN)
