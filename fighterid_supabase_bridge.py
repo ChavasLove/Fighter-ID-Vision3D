@@ -131,6 +131,16 @@ class FighterIDAPI:
             print(f"[FighterIDAPI] supabase client init error: {e}")
         return self._db
 
+    def _reset_db(self):
+        """Descarta el cliente Supabase — fuerza reconexión en el próximo _get_db()."""
+        self._db = None
+
+    @staticmethod
+    def _is_disconnect(exc) -> bool:
+        s = str(exc).lower()
+        return any(k in s for k in ("server disconnected", "connectionerror",
+                                    "connection reset", "broken pipe", "eof occurred"))
+
     # ------------------------------------------------------------------
     # Session & fighter discovery
     # ------------------------------------------------------------------
@@ -166,6 +176,8 @@ class FighterIDAPI:
                   f"  fight_id={self._fight_id or '(pendiente)'}")
             return row
         except Exception as e:
+            if self._is_disconnect(e):
+                self._reset_db()
             print(f"[FighterIDAPI] fetch_active_session error: {e}")
             return None
 
@@ -218,6 +230,8 @@ class FighterIDAPI:
             print(f"[FighterIDAPI] fighters → "
                   f"red={self._fighter_red_name}  blue={self._fighter_blue_name}")
         except Exception as e:
+            if self._is_disconnect(e):
+                self._reset_db()
             print(f"[FighterIDAPI] _load_fighters error: {e}")
 
     def connect_engine(self, session_token):
@@ -248,6 +262,8 @@ class FighterIDAPI:
                 print("[FighterIDAPI] connect-engine OK (DB fallback)")
                 return True
             except Exception as e:
+                if self._is_disconnect(e):
+                    self._reset_db()
                 print(f"[FighterIDAPI] connect-engine FAILED: {e}")
         return False
 
@@ -355,7 +371,8 @@ class FighterIDAPI:
             "_session_id":    self._session_id,
             "_fighter_id":    db_fighter_id,
             "_fighter_corner": fighter_id,          # "red" | "blue"
-            # Edge-function / legacy fields
+            # Edge-function fields (ai-strike-ingest/event)
+            "sessionId":      self._session_id,          # FK requerida por ai_strike_events
             "fightId":        self._fight_id,
             "round":          self._round_num,
             "timestamp_ms":   int(time.time() * 1000),
@@ -472,11 +489,9 @@ class FighterIDAPI:
                 self.sent_ok += 1
                 return
             except Exception as e:
-                err = e
-                if hasattr(e, 'args') and e.args:
-                    err_str = str(e.args[0])
-                else:
-                    err_str = str(e)
+                if self._is_disconnect(e):
+                    self._reset_db()
+                err_str = str(e.args[0]) if (hasattr(e, 'args') and e.args) else str(e)
                 # PGRST204 = column not found in schema cache → run migration
                 if "PGRST204" in err_str or "event_type" in err_str:
                     print(f"[FighterIDAPI] DB insert error: {e}")
@@ -506,6 +521,12 @@ class FighterIDAPI:
             self._send_event_to_db(evt)
 
     def _session_worker(self):
+        # ─────────────────────────────────────────────────────────────────
+        # Endpoints correctos (ai-strike-ingest v2.1):
+        #   session_start → POST ai-strike-ingest/start      ← CORRECTO
+        #   fight_end     → POST ai-strike-ingest/stop + /end
+        # NO usar: /vision-start-session  /heartbeat  /connect-engine
+        # ─────────────────────────────────────────────────────────────────
         while True:
             if not self._session_queue:
                 time.sleep(0.1)
@@ -514,7 +535,8 @@ class FighterIDAPI:
             action  = payload.pop("_action", "")
 
             if action == "session_start":
-                ok, data = self._post("start", payload)
+                # POST ai-strike-ingest/start — inicia sesión de inferencia
+                ok, data = self._post("start", payload)   # ← /start no /vision-start-session
                 if ok:
                     self._session_id = (data.get("sessionId")
                                         or data.get("session_id")
@@ -527,6 +549,7 @@ class FighterIDAPI:
                           + (f" resp={data}" if data else ""))
 
             elif action == "fight_end":
+                # POST ai-strike-ingest/stop → /end
                 if payload.get("sessionId"):
                     self._post("stop", {
                         "sessionId":     payload["sessionId"],
@@ -553,6 +576,8 @@ class FighterIDAPI:
                     }).eq("id", self._session_id).execute()
                     continue
                 except Exception as e:
+                    if self._is_disconnect(e):
+                        self._reset_db()
                     print(f"[FighterIDAPI] heartbeat DB error: {e}")
 
             # Fallback: POST vision-start-session/telemetry
