@@ -63,18 +63,18 @@ BUILD_DATE    = "2026-03-15"          # YYYY-MM-DD del último push
 #  CONFIG
 # ══════════════════════════════════════════════════════════════════
 ROUND_TIME       = 180;  REST_TIME        = 60;   TOTAL_ROUNDS     = 3
-INFER_IMGSZ      = 320;  INFER_EVERY      = 3;    INFER_CONF       = 0.38
+INFER_IMGSZ      = 512;  INFER_EVERY      = 3;    INFER_CONF       = 0.28
 # Per-camera inference rates (matched to physical FPS)
 INFER_EVERY_AB   = 2     # CAM A & B — 60fps laterales → YOLO a ~30fps
 INFER_EVERY_C    = 1     # CAM C — 30fps cenital → YOLO cada frame
 # Overhead camera calibration & hook detection
 CAM_C_PX_PER_M   = 400.0 # Píxeles por metro en vista cenital (ajustar según altura de montaje)
 CAM_C_TS_BUF     = 8     # Frames en el buffer de timestamp para sincronización 60↔30fps
-HOOK_ARC_THR_DEG = 25.0  # Curvatura mínima (°) en plano XZ para confirmar HOOK
+HOOK_ARC_THR_DEG = 18.0  # Curvatura mínima (°) en plano XZ para confirmar HOOK (18° = +38% más sensible)
 VOTE_WINDOW      = 45;   VOTE_NEEDED      = 18
-PUNCH_SPD_THR_MS = 0.55; PUNCH_SPD_CAP_MS = 25.0
-EXTENSION_THR_M  = 0.14; RETRACTION_RATIO = 0.58
-MIN_PUNCH_DUR    = 0.05; MAX_PUNCH_DUR    = 0.70
+PUNCH_SPD_THR_MS = 0.40; PUNCH_SPD_CAP_MS = 25.0   # 0.55→0.40: captura golpes más lentos/cortos
+EXTENSION_THR_M  = 0.10; RETRACTION_RATIO = 0.72   # 0.14→0.10m: jabs cortos; 0.58→0.72: menos retracción
+MIN_PUNCH_DUR    = 0.03; MAX_PUNCH_DUR    = 0.85   # 0.05→0.03s: golpes rápidos; 0.70→0.85s: más margen
 HIT_R_M          = 0.30; HEAD_HIT_R_M     = 0.20
 BODY_HIT_R_M     = 0.35
 DODGE_SPD_MS     = 0.40; HISTORY_LEN      = 20
@@ -88,7 +88,7 @@ DEFAULT_BASELINE = 1.50
 # ── Professional boxing biomechanical thresholds ────────────────
 # Research refs: McGill 2010, Loturco 2014, Filimonov 1985
 POWER_PUNCH_SPD_MS   = 2.0    # Wrist velocity threshold for "power punch" in scoring
-SCORING_PUNCH_SPD_MS = 1.0    # Minimum wrist speed to count as "clean punch"
+SCORING_PUNCH_SPD_MS = 0.70   # 1.0→0.70 m/s: cuenta más golpes como "limpios" en modo TEST
 COMBO_WINDOW_S       = 1.8    # Max gap (s) between punches to count as a combination
 STANCE_THRESH_M      = 0.04   # Shoulder X-diff threshold for stance detection
 
@@ -1665,8 +1665,9 @@ class Fighter:
                 retracted = ext < cur * RETRACTION_RATIO
                 slow      = spd < PUNCH_SPD_THR_MS * 0.7
                 dur_ok    = MIN_PUNCH_DUR < dur < MAX_PUNCH_DUR
-                peak_ok   = cur > EXTENSION_THR_M * 1.3
-                if retracted and slow and dur_ok and peak_ok:
+                peak_ok   = cur > EXTENSION_THR_M * 1.1   # 1.3→1.1: umbral de pico más accesible
+                # OR lógico: basta con que el puño retroceda O desacelere (antes se requería AMBOS)
+                if (retracted or slow) and dur_ok and peak_ok:
                     av3 = vel3
                     if hl >= 4:
                         seg=list(hist)[-4:]; vxs=[]; vys=[]; vzs=[]
@@ -2831,9 +2832,9 @@ class VisionEngine(threading.Thread):
                 cv2.putText(img,mtxt,(CAM_W-72,54),FS,0.40,mc,1)
 
             trk_tag = "TRK" if use_tracking else "YLO"
-            hud(img_a, f"CAM A · {eng_fps:.0f}fps · 3D:{n_3d}/{max(n_total,1)} · {trk_tag} · KAL", GRN)
-            hud(img_b, f"CAM B · DEPTH REF · lat={inf_b.last_latency_ms:.0f}ms", MAG)
-            hud(img_c, f"CAM C · BROADCAST · lat={inf_c.last_latency_ms:.0f}ms", CYN)
+            hud(img_a, f"CAM B·LAT1 · {eng_fps:.0f}fps · 3D:{n_3d}/{max(n_total,1)} · {trk_tag} · KAL", GRN)
+            hud(img_b, f"CAM C·LAT2 · DEPTH REF · lat={inf_b.last_latency_ms:.0f}ms", MAG)
+            hud(img_c, f"CAM A·CENITAL · BIOMECÁNICA · lat={inf_c.last_latency_ms:.0f}ms", CYN)
 
             # Pre-compute live scores — usa el scorer correspondiente al modo
             if self.tm:
@@ -3177,21 +3178,21 @@ class FighterIDApp(ctk.CTk):
                                   font=ctk.CTkFont(size=9,weight="bold"),
                                   text_color=GUI_GRAY).pack(anchor="w", padx=14, pady=(5,1))
         ctk.CTkFrame(parent, height=10, fg_color="transparent").pack()
-        lbl("CÁMARA A  (IA)")
+        lbl("CÁMARA A  ↑ CENITAL (top)")
         self._cb_a = ctk.CTkComboBox(parent, values=["— escanear —"],
                                      fg_color=GUI_CARD, border_color=GUI_GREEN,
                                      button_color=GUI_GREEN, text_color=GUI_WHITE,
                                      font=ctk.CTkFont(size=9), height=28,
                                      command=lambda v: self._on_cam_select('A',v))
         self._cb_a.pack(fill="x", padx=12, pady=2)
-        lbl("CÁMARA B  (depth)")
+        lbl("CÁMARA B  → LATERAL 1  (IA)")
         self._cb_b = ctk.CTkComboBox(parent, values=["— escanear —"],
                                      fg_color=GUI_CARD, border_color=GUI_MAGENTA,
                                      button_color=GUI_MAGENTA, text_color=GUI_WHITE,
                                      font=ctk.CTkFont(size=9), height=28,
                                      command=lambda v: self._on_cam_select('B',v))
         self._cb_b.pack(fill="x", padx=12, pady=2)
-        lbl("CÁMARA C  (broadcast)")
+        lbl("CÁMARA C  → LATERAL 2  (depth)")
         self._cb_c = ctk.CTkComboBox(parent, values=["— escanear —"],
                                      fg_color=GUI_CARD, border_color=GUI_CYAN,
                                      button_color=GUI_CYAN, text_color=GUI_WHITE,
@@ -3304,9 +3305,9 @@ class FighterIDApp(ctk.CTk):
         self._cam_title_lbls = []   # referencias para actualizar tras "Aplicar"
         self._cam_info_lbls  = []   # subtítulo: [índice] nombre  fps
         _CAM_DEFS = [
-            ("CAM A  ·  IA + KALMAN", GUI_GREEN),
-            ("CAM B  ·  DEPTH REF",   GUI_MAGENTA),
-            ("CAM C  ·  BROADCAST",   GUI_CYAN),
+            ("CAM A  ·  CENITAL TOP",   GUI_GREEN),
+            ("CAM B  ·  IA + KALMAN",   GUI_MAGENTA),
+            ("CAM C  ·  DEPTH REF",     GUI_CYAN),
         ]
         for title, color in _CAM_DEFS:
             f = ctk.CTkFrame(cam_row, fg_color=GUI_CARD, corner_radius=10)
@@ -3433,12 +3434,16 @@ class FighterIDApp(ctk.CTk):
         try: INFER_EVERY = max(1, int(self._infer_entry.get()))
         except: pass
 
-        print(f"[GUI] APLICAR: sel_a={self._sel_a} sel_b={self._sel_b} sel_c={self._sel_c}")
+        print(f"[GUI] APLICAR: sel_a={self._sel_a}(cenital) sel_b={self._sel_b}(lat1) sel_c={self._sel_c}(lat2)")
         self._top_status.configure(
-            text=f"Cargando YOLO + abriendo A={self._sel_a} B={self._sel_b} C={self._sel_c}...",
+            text=f"Cargando YOLO + abriendo cenital={self._sel_a} lat1={self._sel_b} lat2={self._sel_c}...",
             text_color=GUI_GRAY)
         self.update()
-        self._engine = VisionEngine(self._sel_a, self._sel_b, self._sel_c, DEFAULT_BASELINE)
+        # Camera role mapping:
+        #   sel_a = Cámara A (cenital/overhead) → engine cam_c (biomecánica overhead)
+        #   sel_b = Cámara B (lateral 1)        → engine cam_a (detección principal + Kalman)
+        #   sel_c = Cámara C (lateral 2)        → engine cam_b (referencia depth/estéreo)
+        self._engine = VisionEngine(self._sel_b, self._sel_c, self._sel_a, DEFAULT_BASELINE)
         self._engine.start()
         self._running = True
         self._update_cam_titles()          # actualiza encabezados con índice/nombre/fps
@@ -3454,7 +3459,7 @@ class FighterIDApp(ctk.CTk):
         no los valores del probe que reflejan la resolución nativa sin configurar del driver.
         """
         cam_map = {c['index']: c for c in ALL_CAMERAS}
-        roles   = ["IA + KALMAN", "DEPTH REF", "BROADCAST"]
+        roles   = ["CENITAL TOP", "IA + KALMAN", "DEPTH REF"]
         letters = ["A", "B", "C"]
         slots   = [self._sel_a, self._sel_b, self._sel_c]
         colors  = [GUI_GREEN, GUI_MAGENTA, GUI_CYAN]
