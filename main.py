@@ -752,6 +752,39 @@ class BoxingScorer:
                   f"{'═'*82}\n")
         return header + "\n".join(rows) + footer
 
+    @staticmethod
+    def compute_qualification(round_raw_scores: list) -> dict:
+        """
+        Aggregates per-round raw scores into a final session qualification grade.
+
+        Grade scale (amateur boxing / sports-science performance reference):
+          S  Élite          ≥ 85 pts
+          A  Excelente      70 – 84 pts
+          B  Bueno          55 – 69 pts
+          C  Adecuado       40 – 54 pts
+          D  En progreso    25 – 39 pts
+          F  Necesita trabajo  < 25 pts
+        """
+        if not round_raw_scores:
+            return {'grade': '—', 'score': 0.0, 'label': 'Sin datos',
+                    'rounds_scored': 0, 'avg_raw': 0.0}
+        avg = sum(round_raw_scores) / len(round_raw_scores)
+        # Normalize to 0–100 (raw scores typically range 0–120)
+        normalized = min(round(avg / 1.2, 1), 100.0)
+        if   normalized >= 85: grade, label = 'S', 'Élite'
+        elif normalized >= 70: grade, label = 'A', 'Excelente'
+        elif normalized >= 55: grade, label = 'B', 'Bueno'
+        elif normalized >= 40: grade, label = 'C', 'Adecuado'
+        elif normalized >= 25: grade, label = 'D', 'En progreso'
+        else:                  grade, label = 'F', 'Necesita trabajo'
+        return {
+            'grade':         grade,
+            'score':         normalized,
+            'label':         label,
+            'rounds_scored': len(round_raw_scores),
+            'avg_raw':       round(avg, 2),
+        }
+
 SKELETON_PAIRS = [
     (5,6),(5,7),(7,9),(6,8),(8,10),
     (5,11),(6,12),(11,12),(11,13),(13,15),(12,14),(14,16),
@@ -934,6 +967,10 @@ class Fighter:
         self._combo_n      = 0          # consecutive punches in current combo
         # glove status (bare=True means bare hand detected at wrist)
         self.glove_detected = True      # default assume gloves until proven otherwise
+        # ── Biomechanical quality metrics ──────────────────────────
+        self.punch_left_count  = 0       # per-side count for load balance
+        self.punch_right_count = 0
+        self._kinetic_scores   = deque(maxlen=20)  # kinetic chain quality per punch
 
     def reset(self):
         self.strikes = self.connected = self.aggr = self.face_hits = self.body_hits = 0
@@ -945,6 +982,8 @@ class Fighter:
         self.head.reset(); self._lfht = 0.0; self.spd_history.clear()
         self.power_strikes = 0; self.combo_count = 0
         self._last_punch_t = 0.0; self._in_combo = False; self._combo_n = 0
+        self.punch_left_count = 0; self.punch_right_count = 0
+        self._kinetic_scores.clear()
 
     def detect_stance(self):
         """
@@ -991,6 +1030,36 @@ class Fighter:
         if lh is None or rh is None: return 0.0
         return float(lh[0] - rh[0])
 
+    def _kinetic_chain_quality(self) -> float:
+        """
+        Estimate kinetic chain efficiency: 0.0 (poor) – 1.0 (excellent).
+        Good boxing technique has coordinated hip + shoulder rotation (same direction).
+        Returns 0.0 when no 3D data is available.
+        """
+        sh_rot  = self._shoulder_rotation()
+        hip_rot = self._hip_rotation()
+        if abs(sh_rot) < 0.01 and abs(hip_rot) < 0.01:
+            return 0.0
+        if abs(hip_rot) < 0.01:
+            return 0.5   # shoulder rotation only — partial chain
+        coordinated = (sh_rot * hip_rot) > 0   # same rotational direction
+        ratio = min(abs(sh_rot) / (abs(hip_rot) + 0.001), 2.0) / 2.0
+        return round(0.6 + 0.4 * ratio if coordinated else 0.2 * ratio, 2)
+
+    def punch_balance(self) -> float:
+        """
+        Left/right punch balance: 1.0 = perfectly balanced, 0.0 = all one side.
+        """
+        total = self.punch_left_count + self.punch_right_count
+        if total == 0: return 0.0
+        minor = min(self.punch_left_count, self.punch_right_count)
+        return round(minor / total * 2, 2)
+
+    def kinetic_chain_avg(self) -> float:
+        """Average kinetic chain quality across the last 20 punches."""
+        if not self._kinetic_scores: return 0.0
+        return round(float(np.mean(list(self._kinetic_scores))), 2)
+
     def _classify(self, wp3, sp3, left, vel3, dur, mx) -> str:
         if sp3 is None: return "UNKNOWN"
         vx, vy, vz = vel3; spd = math.sqrt(vx*vx + vy*vy + vz*vz)
@@ -1009,7 +1078,9 @@ class Fighter:
             return "BODYSHOT"
 
         # UPPERCUT: upward trajectory, bent elbow
-        if vyn < -0.4 and hdiff < 0.1 and (elbow < 120 or elbow == 0):
+        # elbow == 0 means no 3D data → use lateral ratio as proxy (uppercuts are less lateral)
+        elbow_bent = (elbow < 120) if elbow > 0 else (lat < 0.5)
+        if vyn < -0.4 and hdiff < 0.1 and elbow_bent:
             return "UPPERCUT"
 
         # HOOK: lateral trajectory, bent elbow
@@ -1103,6 +1174,10 @@ class Fighter:
                     else:
                         self._combo_n = 1         # reset, this is first punch of new window
                     self._last_punch_t = t
+                    # ── Biomechanical quality ─────────────────────
+                    self._kinetic_scores.append(self._kinetic_chain_quality())
+                    if left: self.punch_left_count  += 1
+                    else:    self.punch_right_count += 1
                     # ── Stance update per punch ────────────────────
                     self.detect_stance()
                     if left: self.punchL=False; self.mL=0.0
@@ -1355,7 +1430,11 @@ class VisionEngine(threading.Thread):
             "power_strikes": ftr.power_strikes,
             "combo_count":   ftr.combo_count,
             "stance":        ftr.stance,
-            "punch_types":   ftr.ptypes.copy(),
+            "punch_types":       ftr.ptypes.copy(),
+            "punch_balance":     ftr.punch_balance(),
+            "kinetic_chain_avg": ftr.kinetic_chain_avg(),
+            "punch_left_count":  ftr.punch_left_count,
+            "punch_right_count": ftr.punch_right_count,
         }
 
     def _end_round(self):
@@ -1443,6 +1522,106 @@ class VisionEngine(threading.Thread):
         except Exception as e:
             print(f"[report] Error guardando round report: {e}")
 
+    def _emit_session_report(self):
+        """
+        Aggregate all round data into a final session JSON report with qualification grade.
+        Prints a CompuBox-style final scoreboard and saves session_report_<ts>.json.
+        """
+        try:
+            ts        = datetime.datetime.now()
+            ts_str    = ts.isoformat()
+            is_test   = self.tm
+
+            red_raw_scores: list  = []
+            blue_raw_scores: list = []
+            red_wins = blue_wins = draws = n_played = 0
+
+            for r in range(1, TOTAL_ROUNDS + 1):
+                rdata = self.rnd_stats.get(r, {})
+                mode  = rdata.get('mode', '')
+                if mode == 'skipped':
+                    continue
+                n_played += 1
+                if mode == 'test':
+                    bx = rdata.get('boxing_score', {})
+                    red_raw_scores.append(bx.get('raw_score', 0.0))
+                else:  # fight
+                    red_raw_scores.append(rdata.get('red_score', 0.0))
+                    blue_raw_scores.append(rdata.get('blue_score', 0.0))
+                    w = rdata.get('winner', '')
+                    if   w == 'red':  red_wins  += 1
+                    elif w == 'blue': blue_wins += 1
+                    elif w == 'draw': draws     += 1
+
+            q_red  = BoxingScorer.compute_qualification(red_raw_scores)
+            q_blue = BoxingScorer.compute_qualification(blue_raw_scores) if not is_test else None
+
+            if is_test:
+                final_summary = {
+                    'mode':           'test',
+                    'rounds_played':  n_played,
+                    'qualification':  q_red,
+                }
+                summary_txt = (
+                    f"\n{'═'*62}\n"
+                    f"  REPORTE FINAL DE SESIÓN  —  MODO TEST\n"
+                    f"{'─'*62}\n"
+                    f"  Rounds completados  : {n_played} / {TOTAL_ROUNDS}\n"
+                    f"  Score promedio      : {q_red['avg_raw']:.1f} pts (raw)\n"
+                    f"  Score normalizado   : {q_red['score']:.1f} / 100\n"
+                    f"  ★  CALIFICACIÓN     : {q_red['grade']}  —  {q_red['label']}\n"
+                    f"{'═'*62}\n"
+                )
+            else:
+                if   red_wins  > blue_wins: overall_winner = "ROJO"
+                elif blue_wins > red_wins:  overall_winner = "AZUL"
+                else:                       overall_winner = "EMPATE"
+                final_summary = {
+                    'mode':               'fight',
+                    'rounds_played':      n_played,
+                    'red_wins':           red_wins,
+                    'blue_wins':          blue_wins,
+                    'draws':              draws,
+                    'overall_winner':     overall_winner,
+                    'red_qualification':  q_red,
+                    'blue_qualification': q_blue,
+                }
+                summary_txt = (
+                    f"\n{'═'*62}\n"
+                    f"  REPORTE FINAL DE SESIÓN  —  MODO PELEA\n"
+                    f"{'─'*62}\n"
+                    f"  Rounds completados  : {n_played} / {TOTAL_ROUNDS}\n"
+                    f"  ROJO {red_wins}V – AZUL {blue_wins}V – {draws} EMPATES\n"
+                    f"  ★  GANADOR SESIÓN   : {overall_winner}\n"
+                    f"{'─'*62}\n"
+                    f"  ROJO — Cal: {q_red['grade']}  {q_red['score']:.1f}/100  {q_red['label']}\n"
+                    f"  AZUL — Cal: {q_blue['grade']}  {q_blue['score']:.1f}/100  {q_blue['label']}\n"
+                    f"{'═'*62}\n"
+                )
+
+            print(summary_txt)
+            grade_log = q_red['grade']
+            self._log(f"★ SESIÓN FINAL: Cal={grade_log} ({q_red['score']:.0f}/100) — {q_red['label']}")
+
+            report = {
+                'version':       '1.0',
+                'system':        BUILD_VERSION,
+                'generated_at':  ts_str,
+                'total_rounds':  TOTAL_ROUNDS,
+                'rounds_played': n_played,
+                'rounds': {
+                    str(r): self.rnd_stats.get(r, {'mode': 'skipped'})
+                    for r in range(1, TOTAL_ROUNDS + 1)
+                },
+                'summary': final_summary,
+            }
+            fname = f"session_report_{ts.strftime('%Y%m%d_%H%M%S')}.json"
+            with open(fname, 'w', encoding='utf-8') as fp:
+                json.dump(report, fp, indent=2, ensure_ascii=False)
+            self._log(f"Reporte sesión → {fname}")
+        except Exception as e:
+            print(f"[session_report] Error: {e}")
+
     def _check_gloves_ready(self) -> tuple:
         """
         Returns (ok: bool, msg: str).
@@ -1512,6 +1691,7 @@ class VisionEngine(threading.Thread):
             self._emit_round_report(r, "skipped", skipped_data, ts_now)
         if DATASET_ENABLED:
             DATASET.stop_session()
+        self._emit_session_report()
         self.session_state = "IDLE"; self.phase = "IDLE"
         self._log("=== SESIÓN FINALIZADA (todos los reportes emitidos) ===")
 
@@ -1975,6 +2155,7 @@ class VisionEngine(threading.Thread):
                         self._end_round(); self.rnd_done += 1
                         if self.rnd_done >= TOTAL_ROUNDS:
                             self._log("=== SESIÓN TERMINADA ===")
+                            self._emit_session_report()
                             if DATASET_ENABLED: DATASET.stop_session()
                             self.session_state="IDLE"; self.phase="IDLE"
                         else:
@@ -2047,6 +2228,8 @@ class VisionEngine(threading.Thread):
                     'stance':self.red.stance,
                     'boxing_score':r_bx,
                     'glove_ok':self._glove_ok.get(self.roles.red_pid, False),
+                    'punch_balance':self.red.punch_balance(),
+                    'kinetic_chain':self.red.kinetic_chain_avg(),
                 },
                 'blue':{
                     'strikes':self.blue.strikes,'connected':self.blue.connected,
@@ -2060,6 +2243,8 @@ class VisionEngine(threading.Thread):
                     'stance':self.blue.stance,
                     'boxing_score':b_bx,
                     'glove_ok':self._glove_ok.get(self.roles.blue_pid, False),
+                    'punch_balance':self.blue.punch_balance(),
+                    'kinetic_chain':self.blue.kinetic_chain_avg(),
                 },
                 'rnd_winners':dict(self.rnd_winners),
                 'n_3d':n_3d,'n_kp':n_total,'baseline':self.stereo_ab.B,
@@ -2092,10 +2277,10 @@ class VisionEngine(threading.Thread):
 class StatCard(ctk.CTkFrame):
     def __init__(self, parent, label, value="—", unit="", accent=GUI_CYAN, **kw):
         super().__init__(parent, fg_color=GUI_CARD, corner_radius=8, **kw)
-        ctk.CTkLabel(self, text=label, font=ctk.CTkFont(size=9,weight="bold"),
+        ctk.CTkLabel(self, text=label, font=ctk.CTkFont(size=10,weight="bold"),
                      text_color=GUI_GRAY).pack(anchor="w", padx=8, pady=(6,0))
         self._val = ctk.CTkLabel(self, text=value,
-                                 font=ctk.CTkFont("Courier New",18,weight="bold"),
+                                 font=ctk.CTkFont("Courier New",20,weight="bold"),
                                  text_color=accent)
         self._val.pack(anchor="w", padx=8)
         ctk.CTkLabel(self, text=unit if unit else " ",
@@ -2386,7 +2571,7 @@ class FighterIDApp(ctk.CTk):
             lbl = ctk.CTkLabel(f, text="", fg_color=GUI_BLACK)
             lbl.pack(fill="both", expand=True, padx=4, pady=(0,4))
             self._cam_lbls.append(lbl)
-        stats_bar = ctk.CTkFrame(parent, fg_color=GUI_PANEL, height=210, corner_radius=0)
+        stats_bar = ctk.CTkFrame(parent, fg_color=GUI_PANEL, height=260, corner_radius=0)
         stats_bar.pack(fill="x"); stats_bar.pack_propagate(False)
         info = ctk.CTkFrame(stats_bar, fg_color="transparent", height=32)
         info.pack(fill="x", padx=14, pady=(6,0)); info.pack_propagate(False)
@@ -2426,7 +2611,7 @@ class FighterIDApp(ctk.CTk):
                                   font=ctk.CTkFont(size=9, weight="bold"),
                                   text_color=GUI_ORANGE)
         glove_lbl.pack(anchor="w", padx=10, pady=(0,1)); cards['_glove'] = glove_lbl
-        tl = ctk.CTkLabel(f, text="", font=ctk.CTkFont("Courier New",9),
+        tl = ctk.CTkLabel(f, text="", font=ctk.CTkFont("Courier New",11),
                            text_color=GUI_GRAY, justify="left")
         tl.pack(anchor="w", padx=10, pady=(0,4)); cards['_tl'] = tl
         return cards
@@ -2535,11 +2720,14 @@ class FighterIDApp(ctk.CTk):
                 stance = data.get('stance', '?')
                 combos = data.get('combo_count', 0)
                 pwr_pct = bx.get('power_pct', 0.0)
+                bal = data.get('punch_balance', 0.0)
+                kc  = data.get('kinetic_chain', 0.0)
                 cards['_tl'].configure(
                     text=(f"J:{pt.get('JAB',0)} C:{pt.get('CROSS',0)} "
                           f"H:{pt.get('HOOK',0)} U:{pt.get('UPPERCUT',0)} "
                           f"O:{pt.get('OVERHAND',0)} B:{pt.get('BODYSHOT',0)}  "
-                          f"| Combos:{combos}  Poder:{pwr_pct:.0f}%  [{stance}]"))
+                          f"| Combos:{combos}  Poder:{pwr_pct:.0f}%  [{stance}]  "
+                          f"Bal:{bal:.2f}  KC:{kc:.2f}"))
                 # Glove indicator
                 glove_ok = data.get('glove_ok', False)
                 if glove_ok:
