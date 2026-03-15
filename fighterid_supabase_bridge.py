@@ -1,29 +1,39 @@
 """
-FighterID Vision — Supabase Bridge v2.1
+FighterID Vision — Supabase Bridge v2.2
 Reemplaza la clase FighterIDAPI de main.py.
 
-Endpoints disponibles en ai-strike-ingest:
-  POST /start   POST /event   POST /stop   POST /end   POST /log
-  GET  /health  GET  /metrics
-  (NO existen: /heartbeat, /connect-engine, /vision-start-session)
+Edge Functions disponibles:
+  vision-start-session
+    POST /              → Crea sesión en vision_sync_sessions
+    POST /connect       → Motor marca vision_connected: true
+    POST /telemetry     → Actualiza heartbeat en fight_telemetry_sessions
+
+  ai-strike-ingest (v2.1)
+    POST /start         → Inicia sesión de inferencia
+    POST /event         → Inserta golpes en ai_strike_events
+    POST /stop          → Detiene sesión con métricas
+    POST /end           → Calcula estadísticas finales
+    GET  /health        → Health check
 
 Flujo de datos:
   start_session()
     → GET  fight_telemetry_sessions (status=active)
     → GET  fighter_profiles (red + blue)
-    → DB   UPDATE vision_connected=true  (sin endpoint dedicado)
-    → POST /start  (edge function)
+    → POST vision-start-session/          (crea sync session)
+    → POST vision-start-session/connect   (vision_connected=true)
+    → POST ai-strike-ingest/start         (inicia inferencia)
 
   send()  [por cada golpe detectado]
     → INSERT fight_telemetry_events  (directo a DB)
-    → fallback: POST /event  (edge function)
+    → fallback: POST ai-strike-ingest/event
 
   _heartbeat_worker()  [cada 3s mientras hay pelea]
     → DB   UPDATE fight_telemetry_sessions.vision_connected / last_heartbeat
-    → fallback: POST /log  (sin endpoint /heartbeat)
+    → fallback: POST vision-start-session/telemetry
 
   end_fight()
-    → POST /stop + /end  (edge function)
+    → POST ai-strike-ingest/stop
+    → POST ai-strike-ingest/end
 """
 
 import threading
@@ -121,6 +131,16 @@ class FighterIDAPI:
             print(f"[FighterIDAPI] supabase client init error: {e}")
         return self._db
 
+    def _reset_db(self):
+        """Descarta el cliente Supabase — fuerza reconexión en el próximo _get_db()."""
+        self._db = None
+
+    @staticmethod
+    def _is_disconnect(exc) -> bool:
+        s = str(exc).lower()
+        return any(k in s for k in ("server disconnected", "connectionerror",
+                                    "connection reset", "broken pipe", "eof occurred"))
+
     # ------------------------------------------------------------------
     # Session & fighter discovery
     # ------------------------------------------------------------------
@@ -149,9 +169,15 @@ class FighterIDAPI:
             self._session_token = row.get("session_token")
             self._fighter_red_id  = row.get("fighter_red_id")
             self._fighter_blue_id = row.get("fighter_blue_id")
-            print(f"[FighterIDAPI] sesión activa → id={self._session_id}")
+            # Usar fight_id de la DB si existe — evita FK constraint en ai_fight_results
+            if row.get("fight_id"):
+                self._fight_id = row["fight_id"]
+            print(f"[FighterIDAPI] sesión activa → id={self._session_id}"
+                  f"  fight_id={self._fight_id or '(pendiente)'}")
             return row
         except Exception as e:
+            if self._is_disconnect(e):
+                self._reset_db()
             print(f"[FighterIDAPI] fetch_active_session error: {e}")
             return None
 
@@ -204,17 +230,28 @@ class FighterIDAPI:
             print(f"[FighterIDAPI] fighters → "
                   f"red={self._fighter_red_name}  blue={self._fighter_blue_name}")
         except Exception as e:
+            if self._is_disconnect(e):
+                self._reset_db()
             print(f"[FighterIDAPI] _load_fighters error: {e}")
 
     def connect_engine(self, session_token):
         """
-        Marca vision_connected=true en fight_telemetry_sessions.
-
-        El endpoint /vision/connect-engine NO existe en el backend.
-        Ruta primaria: UPDATE directo vía supabase-py.
-        Fallback: POST /log  (informa al backend que el motor se conectó).
+        Marca vision_connected=true.
+        Ruta 1: POST vision-start-session/connect (endpoint real).
+        Ruta 2: UPDATE directo en DB (fallback si el edge function falla).
         """
-        # ── Ruta 1: DB directo (más rápido, sin edge function) ────────────
+        # ── Ruta 1: POST vision-start-session/connect ─────────────────────
+        ok, _ = self._post_vsync("connect", {
+            "session_token": session_token,
+            "session_id":    self._session_id,
+            "engine":        "vision-ai-v1",
+            "model_version": "v4.2",
+            "timestamp_ms":  int(time.time() * 1000),
+        })
+        if ok:
+            print("[FighterIDAPI] connect-engine OK (vision-start-session/connect)")
+            return True
+        # ── Ruta 2: DB directo como fallback ──────────────────────────────
         db = self._get_db()
         if db and self._session_id:
             try:
@@ -222,30 +259,38 @@ class FighterIDAPI:
                     "vision_connected": True,
                     "last_heartbeat":   "now()",
                 }).eq("id", self._session_id).execute()
-                print("[FighterIDAPI] connect-engine OK (DB)")
+                print("[FighterIDAPI] connect-engine OK (DB fallback)")
                 return True
             except Exception as e:
-                print(f"[FighterIDAPI] connect-engine DB error: {e}")
+                if self._is_disconnect(e):
+                    self._reset_db()
+                print(f"[FighterIDAPI] connect-engine FAILED: {e}")
+        return False
 
-        # ── Ruta 2: POST /log como señal de conexión ───────────────────────
-        ok, _ = self._post("log", {
-            "event":         "vision_connected",
-            "session_token": session_token,
+    def _create_vision_sync_session(self):
+        """
+        POST vision-start-session/ — registra el motor en vision_sync_sessions.
+        Llamado al inicio de cada sesión para que el HUD sepa que Vision está conectado.
+        """
+        ok, data = self._post_vsync("", {
+            "session_id":    self._session_id,
+            "fight_id":      self._fight_id,
             "engine":        "vision-ai-v1",
+            "model_version": "v4.2",
             "timestamp_ms":  int(time.time() * 1000),
         })
-        print(f"[FighterIDAPI] connect-engine {'OK' if ok else 'FAILED'} (/log fallback)")
-        return ok
+        print(f"[FighterIDAPI] vision-sync-session {'creada' if ok else 'FAILED'}"
+              + (f" → {data.get('id','')}" if ok and data else ""))
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def start_session(self, fight_id, fighter_a_name="Rojo", fighter_b_name="Azul", mode="fight"):
-        self._fight_id  = fight_id
+        self._fight_id  = fight_id   # provisional — puede ser sobreescrito por DB en fetch_active_session
         self._round_num = 1
 
-        # 1) Fetch active session from DB
+        # 1) Fetch active session from DB (también actualiza self._fight_id si la DB tiene uno)
         session_row = self.fetch_active_session()
 
         # 2) Load real fighter names (overrides caller-supplied defaults)
@@ -255,11 +300,14 @@ class FighterIDAPI:
             self._fighter_red_name  = fighter_a_name
             self._fighter_blue_name = fighter_b_name
 
-        # 3) Register this engine with the HUD session
+        # 3) Crear sync session en vision_sync_sessions
+        self._create_vision_sync_session()
+
+        # 4) Registrar motor como conectado en la sesión activa
         if self._session_token:
             self.connect_engine(self._session_token)
 
-        # 4) Queue edge-function /start call
+        # 5) Queue edge-function ai-strike-ingest/start call
         payload = {
             "_action":        "session_start",
             "fightId":        fight_id,
@@ -323,7 +371,8 @@ class FighterIDAPI:
             "_session_id":    self._session_id,
             "_fighter_id":    db_fighter_id,
             "_fighter_corner": fighter_id,          # "red" | "blue"
-            # Edge-function / legacy fields
+            # Edge-function fields (ai-strike-ingest/event)
+            "sessionId":      self._session_id,          # FK requerida por ai_strike_events
             "fightId":        self._fight_id,
             "round":          self._round_num,
             "timestamp_ms":   int(time.time() * 1000),
@@ -359,7 +408,11 @@ class FighterIDAPI:
 
     def _base_url(self):
         import main as m
-        return m.FIGHTERID_API_URL
+        return m.FIGHTERID_API_URL            # .../functions/v1/ai-strike-ingest
+
+    def _vsync_url(self):
+        import main as m
+        return f"{m.FIGHTERID_EDGE_URL}/vision-start-session"  # .../functions/v1/vision-start-session
 
     def _post(self, path, body, timeout=5):
         import main as m
@@ -382,6 +435,27 @@ class FighterIDAPI:
             return ok, data
         except Exception as e:
             print(f"[FighterIDAPI] POST /{path} error: {e}")
+            return False, {}
+
+    def _post_vsync(self, subpath, body, timeout=5):
+        """POST a vision-start-session/<subpath>. subpath='' para la raíz."""
+        import main as m
+        if not m.API_ENABLED or not m.FIGHTERID_API_KEY:
+            return False, {}
+        url = self._vsync_url() + (f"/{subpath}" if subpath else "")
+        try:
+            r = requests.post(url, json=body, headers=self._headers(), timeout=timeout)
+            ok = r.status_code < 300
+            try:
+                data = r.json()
+            except Exception:
+                data = {}
+            if not ok:
+                print(f"[FighterIDAPI] POST vision-start-session/{subpath} "
+                      f"HTTP {r.status_code}: {data}")
+            return ok, data
+        except Exception as e:
+            print(f"[FighterIDAPI] POST vision-start-session/{subpath} error: {e}")
             return False, {}
 
     def _send_event_to_db(self, evt):
@@ -415,11 +489,9 @@ class FighterIDAPI:
                 self.sent_ok += 1
                 return
             except Exception as e:
-                err = e
-                if hasattr(e, 'args') and e.args:
-                    err_str = str(e.args[0])
-                else:
-                    err_str = str(e)
+                if self._is_disconnect(e):
+                    self._reset_db()
+                err_str = str(e.args[0]) if (hasattr(e, 'args') and e.args) else str(e)
                 # PGRST204 = column not found in schema cache → run migration
                 if "PGRST204" in err_str or "event_type" in err_str:
                     print(f"[FighterIDAPI] DB insert error: {e}")
@@ -449,6 +521,12 @@ class FighterIDAPI:
             self._send_event_to_db(evt)
 
     def _session_worker(self):
+        # ─────────────────────────────────────────────────────────────────
+        # Endpoints correctos (ai-strike-ingest v2.1):
+        #   session_start → POST ai-strike-ingest/start      ← CORRECTO
+        #   fight_end     → POST ai-strike-ingest/stop + /end
+        # NO usar: /vision-start-session  /heartbeat  /connect-engine
+        # ─────────────────────────────────────────────────────────────────
         while True:
             if not self._session_queue:
                 time.sleep(0.1)
@@ -457,7 +535,8 @@ class FighterIDAPI:
             action  = payload.pop("_action", "")
 
             if action == "session_start":
-                ok, data = self._post("start", payload)
+                # POST ai-strike-ingest/start — inicia sesión de inferencia
+                ok, data = self._post("start", payload)   # ← /start no /vision-start-session
                 if ok:
                     self._session_id = (data.get("sessionId")
                                         or data.get("session_id")
@@ -470,6 +549,7 @@ class FighterIDAPI:
                           + (f" resp={data}" if data else ""))
 
             elif action == "fight_end":
+                # POST ai-strike-ingest/stop → /end
                 if payload.get("sessionId"):
                     self._post("stop", {
                         "sessionId":     payload["sessionId"],
@@ -496,12 +576,14 @@ class FighterIDAPI:
                     }).eq("id", self._session_id).execute()
                     continue
                 except Exception as e:
+                    if self._is_disconnect(e):
+                        self._reset_db()
                     print(f"[FighterIDAPI] heartbeat DB error: {e}")
 
-            # Fallback: POST /log  (/heartbeat no existe en el backend)
-            self._post("log", {
-                "event":         "heartbeat",
-                "fightId":       self._fight_id,
+            # Fallback: POST vision-start-session/telemetry
+            self._post_vsync("telemetry", {
+                "session_id":    self._session_id,
+                "fight_id":      self._fight_id,
                 "session_token": self._session_token,
                 "engine":        "vision-ai-v1",
                 "timestamp_ms":  int(time.time() * 1000),
