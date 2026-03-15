@@ -1,0 +1,15 @@
+# FighterID Vision3D — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# Computer vision
+opencv-python>=4.8.0
+ultralytics>=8.0.0          # YOLOv8
+
+# Supabase
+supabase>=2.0.0             # Python client (supabase-py)
+
+# HTTP
+requests>=2.31.0
+
+# Utilities
+numpy>=1.24.0
