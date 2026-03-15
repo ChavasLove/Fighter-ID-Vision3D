@@ -1,5 +1,5 @@
 """
-FighterID Vision — Supabase Bridge v2.2
+FighterID Vision — Supabase Bridge v2.3
 Reemplaza la clase FighterIDAPI de main.py.
 
 Edge Functions disponibles:
@@ -38,6 +38,7 @@ Flujo de datos:
 
 import threading
 import time
+import uuid as _uuid_mod
 from collections import deque
 
 import requests
@@ -233,6 +234,103 @@ class FighterIDAPI:
             if self._is_disconnect(e):
                 self._reset_db()
             print(f"[FighterIDAPI] _load_fighters error: {e}")
+
+    # ------------------------------------------------------------------
+    # Fighter profiles — for OfficialSessionDialog
+    # ------------------------------------------------------------------
+
+    def list_fighter_profiles(self):
+        """
+        Returns list of fighter profile dicts for the session dialog.
+        Each dict: {id, name, nickname, weight_class, gym, total_fights, accuracy}
+        """
+        db = self._get_db()
+        if not db:
+            return []
+        try:
+            res = (db.table("fighter_profiles")
+                     .select("id,name,nickname,weight_class,gym,total_fights,accuracy")
+                     .order("name")
+                     .execute())
+            return res.data or []
+        except Exception as e:
+            if self._is_disconnect(e):
+                self._reset_db()
+            print(f"[FighterIDAPI] list_fighter_profiles error: {e}")
+            return []
+
+    def create_fight_session(self, red_id, blue_id, total_rounds=3,
+                             model_version="v4.3"):
+        """
+        Create a new fight_telemetry_sessions row with status='active'.
+        Called from OfficialSessionDialog before the session starts.
+        Populates _session_id, _session_token, _fight_id, _fighter_red/blue_id.
+        Returns the new row dict or None on error.
+        """
+        db = self._get_db()
+        if not db:
+            print("[FighterIDAPI] create_fight_session: supabase-py no disponible")
+            return None
+        fight_id      = str(_uuid_mod.uuid4())
+        session_token = str(_uuid_mod.uuid4())
+        row = {
+            "fight_id":          fight_id,
+            "session_token":     session_token,
+            "status":            "active",
+            "fighter_red_id":    red_id,
+            "fighter_blue_id":   blue_id,
+            "total_rounds":      total_rounds,
+            "model_version":     model_version,
+            "hud_connected":     False,
+            "vision_connected":  False,
+        }
+        try:
+            res = db.table("fight_telemetry_sessions").insert(row).execute()
+            if res.data:
+                created = res.data[0]
+                self._session_id      = created["id"]
+                self._session_token   = created.get("session_token", session_token)
+                self._fight_id        = created.get("fight_id", fight_id)
+                self._fighter_red_id  = red_id
+                self._fighter_blue_id = blue_id
+                print(f"[FighterIDAPI] sesión oficial creada → id={self._session_id}"
+                      f"  fight_id={self._fight_id}")
+                return created
+        except Exception as e:
+            if self._is_disconnect(e):
+                self._reset_db()
+            print(f"[FighterIDAPI] create_fight_session error: {e}")
+        return None
+
+    def start_session_test(self):
+        """
+        Start a local test session for solo training.
+        No Supabase session required — but will reuse one if it exists.
+        """
+        self._round_num = 1
+        # If no active session was pre-created, generate a local fight_id
+        if not self._fight_id:
+            self._fight_id = f"test-{str(_uuid_mod.uuid4())[:8]}"
+            # Still try to attach to any existing active session
+            session_row = self.fetch_active_session()
+            if session_row:
+                self._load_fighters(session_row)
+        # Default names for test mode
+        if not self._fighter_red_name or self._fighter_red_name in ("Rojo", ""):
+            self._fighter_red_name = "Peleador"
+        payload = {
+            "_action":       "session_start",
+            "fightId":       self._fight_id,
+            "source":        "Fighter ID Vision v4.3",
+            "model":         "yolov8-pose",
+            "model_version": "v4.3",
+            "mode":          "test",
+            "fighters":      {"A": self._fighter_red_name, "B": "—"},
+        }
+        if self._session_token:
+            payload["session_token"] = self._session_token
+        self._session_queue.append(payload)
+        print(f"[FighterIDAPI] Sesión TEST iniciada → fight_id={self._fight_id}")
 
     def connect_engine(self, session_token):
         """
