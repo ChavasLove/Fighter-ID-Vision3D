@@ -57,7 +57,7 @@ class FighterIDAPI:
             return None
         try:
             r = requests.get(
-                f"{m.SUPABASE_URL}/vision/get-active-session",
+                f"{m.FIGHTERID_EDGE_URL}/vision/get-active-session",
                 headers=self._headers(),
                 timeout=5,
             )
@@ -78,7 +78,7 @@ class FighterIDAPI:
             return False
         try:
             r = requests.post(
-                f"{m.SUPABASE_URL}/vision/connect-engine",
+                f"{m.FIGHTERID_EDGE_URL}/vision/connect-engine",
                 json={"session_token": session_token, "engine": "vision-ai-v1"},
                 headers=self._headers(),
                 timeout=5,
