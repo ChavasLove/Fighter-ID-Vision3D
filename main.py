@@ -40,11 +40,34 @@ except ImportError:
         import torch
         if torch.cuda.is_available():
             _DEVICE = "cuda"
-            print(f"[GPU] CUDA: {torch.cuda.get_device_name(0)}")
+            print(f"[GPU] CUDA: {torch.cuda.get_device_name(0)}"
+                  f"  VRAM={torch.cuda.get_device_properties(0).total_memory//1024**2}MB"
+                  f"  CUDAv{torch.version.cuda}")
         else:
+            # Diagnóstico detallado — ayuda al usuario a saber qué instalar
+            _cuda_built = getattr(torch.version, 'cuda', None)
             print("[CPU] sin GPU acelerada")
+            if _cuda_built is None:
+                print("      ⚠ PyTorch instalado SIN soporte CUDA (versión CPU-only)")
+                print("      → Reinstala con CUDA para activar la GPU NVIDIA:")
+                print("        pip uninstall torch torchvision torchaudio -y")
+                print("        pip install torch torchvision torchaudio "
+                      "--index-url https://download.pytorch.org/whl/cu121")
+            else:
+                import ctypes, sys
+                _nv = None
+                try:
+                    _nv = ctypes.windll.nvcuda.cuInit
+                    print(f"      PyTorch compilado para CUDA {_cuda_built} "
+                          f"pero el driver NVIDIA no responde correctamente")
+                    print(f"      → Actualiza el driver NVIDIA desde: "
+                          f"https://www.nvidia.com/Download/index.aspx")
+                except Exception:
+                    print(f"      PyTorch compilado para CUDA {_cuda_built} "
+                          f"pero no detecta GPU NVIDIA instalada")
+                    print(f"      → Verifica que los drivers NVIDIA estén instalados")
     except ImportError:
-        print("[CPU] torch no disponible")
+        print("[CPU] torch no disponible — instala: pip install torch")
 try:
     import torch
     torch.set_num_threads(4)

@@ -149,7 +149,11 @@ class FighterIDAPI:
             self._session_token = row.get("session_token")
             self._fighter_red_id  = row.get("fighter_red_id")
             self._fighter_blue_id = row.get("fighter_blue_id")
-            print(f"[FighterIDAPI] sesión activa → id={self._session_id}")
+            # Usar fight_id de la DB si existe — evita FK constraint en ai_fight_results
+            if row.get("fight_id"):
+                self._fight_id = row["fight_id"]
+            print(f"[FighterIDAPI] sesión activa → id={self._session_id}"
+                  f"  fight_id={self._fight_id or '(pendiente)'}")
             return row
         except Exception as e:
             print(f"[FighterIDAPI] fetch_active_session error: {e}")
@@ -242,10 +246,10 @@ class FighterIDAPI:
     # ------------------------------------------------------------------
 
     def start_session(self, fight_id, fighter_a_name="Rojo", fighter_b_name="Azul", mode="fight"):
-        self._fight_id  = fight_id
+        self._fight_id  = fight_id   # provisional — puede ser sobreescrito por DB en fetch_active_session
         self._round_num = 1
 
-        # 1) Fetch active session from DB
+        # 1) Fetch active session from DB (también actualiza self._fight_id si la DB tiene uno)
         session_row = self.fetch_active_session()
 
         # 2) Load real fighter names (overrides caller-supplied defaults)
