@@ -90,9 +90,12 @@ POWER_PUNCH_TYPES  = {"CROSS", "HOOK", "UPPERCUT", "OVERHAND"}
 SCORING_PUNCH_TYPES = {"JAB", "CROSS", "HOOK", "UPPERCUT", "OVERHAND", "BODYSHOT"}
 
 # FighterID Platform API
-FIGHTERID_API_URL = "https://api.fighterid.io/ai-strike-ingest/event"
-FIGHTERID_API_KEY = ""   # set your API key here
-API_ENABLED       = False
+SUPABASE_URL      = "https://eeshomcqztvjkvycdfwi.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVlc2hvbWNxenR2amt2eWNkZndpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYyNDUyMDAsImV4cCI6MjA3MTgyMTIwMH0.JbOPpqzJvzojVRP3hV4QuDeetzRVpRxoaZeBAXrCb2c"
+FIGHTERID_API_URL  = f"{SUPABASE_URL}/functions/v1/ai-strike-ingest"
+FIGHTERID_API_KEY  = SUPABASE_ANON_KEY
+API_ENABLED        = True
+MODEL_VERSION      = BUILD_VERSION
 
 # Dataset capture
 DATASET_DIR = pathlib.Path("dataset_capture")
@@ -966,48 +969,7 @@ DATASET = DatasetCapture()
 # ══════════════════════════════════════════════════════════════════
 #  [8] FIGHTERID API EXPORT
 # ══════════════════════════════════════════════════════════════════
-class FighterIDAPI:
-    def __init__(self):
-        self._queue: deque = deque(maxlen=500)
-        self._thread = threading.Thread(target=self._worker, daemon=True, name="APIExport")
-        self._thread.start()
-        self.sent_ok  = 0
-        self.sent_err = 0
-
-    def _worker(self):
-        while True:
-            if not self._queue:
-                time.sleep(0.05); continue
-            evt = self._queue.popleft()
-            if not API_ENABLED or not FIGHTERID_API_KEY:
-                continue
-            try:
-                r = requests.post(
-                    FIGHTERID_API_URL,
-                    json=evt,
-                    headers={"Authorization": f"Bearer {FIGHTERID_API_KEY}",
-                             "Content-Type": "application/json"},
-                    timeout=3)
-                if r.status_code == 200: self.sent_ok += 1
-                else:                    self.sent_err += 1
-            except Exception as e:
-                self.sent_err += 1
-
-    def send(self, fighter_id: str, punch_type: str, speed: float, extension: float,
-             hit: bool, face_hit: bool, body_hit: bool, elbow_angle: float = 0.0):
-        evt = {
-            "fighter_id":  fighter_id,
-            "punch_type":  punch_type.lower(),
-            "speed":       round(speed, 3),
-            "extension":   round(extension, 3),
-            "hit":         hit,
-            "face_hit":    face_hit,
-            "body_hit":    body_hit,
-            "elbow_angle": round(elbow_angle, 1),
-            "timestamp":   time.time(),
-        }
-        self._queue.append(evt)
-
+from fighterid_supabase_bridge import FighterIDAPI
 FAPI = FighterIDAPI()
 
 # ══════════════════════════════════════════════════════════════════
@@ -2047,7 +2009,16 @@ class VisionEngine(threading.Thread):
         self.red.reset(); self.blue.reset()
         self.rnd_stats={}; self.rnd_winners={}; self._reset_ts()
         if DATASET_ENABLED: DATASET.start_session()
-        self._log("=== SESIÓN INICIADA ==="); return True
+        self._log("=== SESIÓN INICIADA ===")
+        import uuid as _uuid
+        _fight_uuid = str(_uuid.uuid4())
+        FAPI.start_session(
+            fight_id       = _fight_uuid,
+            fighter_a_name = "Esquina Roja",
+            fighter_b_name = "Esquina Azul",
+            mode           = "fight" if not self.tm else "test",
+        )
+        return True
 
     def cmd_pause(self):
         if self.session_state=="RUNNING":
@@ -2103,6 +2074,17 @@ class VisionEngine(threading.Thread):
         if DATASET_ENABLED:
             DATASET.stop_session()
         self._emit_session_report()
+        _red_wins  = sum(1 for v in self.rnd_winners.values() if v == "red")
+        _blue_wins = sum(1 for v in self.rnd_winners.values() if v == "blue")
+        if _red_wins > _blue_wins:   _winner = "red"
+        elif _blue_wins > _red_wins: _winner = "blue"
+        else:                        _winner = "draw"
+        FAPI.end_fight(
+            winner        = _winner,
+            round_results = {str(k): v for k, v in self.rnd_winners.items()},
+            red_stats     = self._build_fighter_stat_dict(self.red),
+            blue_stats    = self._build_fighter_stat_dict(self.blue),
+        )
         self.session_state = "IDLE"; self.phase = "IDLE"
         self._log("=== SESIÓN FINALIZADA (todos los reportes emitidos) ===")
 
@@ -2579,6 +2561,7 @@ class VisionEngine(threading.Thread):
                     rem = max(0, int(REST_TIME - el))
                     if rem == 0:
                         self.rnd += 1; self.phase="ROUND"
+                        FAPI.advance_round(self.rnd)
                         self.t_start=time.time(); self.t_paused=0.0
                         self.red.reset(); self.blue.reset()
                         if self.tm: self._reset_ts()
