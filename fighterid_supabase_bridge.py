@@ -1,12 +1,17 @@
 """
-FighterID Vision — Supabase Bridge v2.0
+FighterID Vision — Supabase Bridge v2.1
 Reemplaza la clase FighterIDAPI de main.py.
+
+Endpoints disponibles en ai-strike-ingest:
+  POST /start   POST /event   POST /stop   POST /end   POST /log
+  GET  /health  GET  /metrics
+  (NO existen: /heartbeat, /connect-engine, /vision-start-session)
 
 Flujo de datos:
   start_session()
     → GET  fight_telemetry_sessions (status=active)
     → GET  fighter_profiles (red + blue)
-    → POST vision/connect-engine  (vision_connected=true)
+    → DB   UPDATE vision_connected=true  (sin endpoint dedicado)
     → POST /start  (edge function)
 
   send()  [por cada golpe detectado]
@@ -14,8 +19,8 @@ Flujo de datos:
     → fallback: POST /event  (edge function)
 
   _heartbeat_worker()  [cada 3s mientras hay pelea]
-    → UPDATE fight_telemetry_sessions.vision_connected / last_heartbeat
-    → fallback: POST /heartbeat  (edge function)
+    → DB   UPDATE fight_telemetry_sessions.vision_connected / last_heartbeat
+    → fallback: POST /log  (sin endpoint /heartbeat)
 
   end_fight()
     → POST /stop + /end  (edge function)
@@ -203,32 +208,34 @@ class FighterIDAPI:
 
     def connect_engine(self, session_token):
         """
-        POST /vision/connect-engine — sets vision_connected=true in
-        fight_telemetry_sessions so the HUD shows VISION ENGINE ONLINE.
+        Marca vision_connected=true en fight_telemetry_sessions.
+
+        El endpoint /vision/connect-engine NO existe en el backend.
+        Ruta primaria: UPDATE directo vía supabase-py.
+        Fallback: POST /log  (informa al backend que el motor se conectó).
         """
-        import main as m
-        if not m.API_ENABLED or not m.FIGHTERID_API_KEY:
-            return False
-        try:
-            r = requests.post(
-                f"{m.FIGHTERID_EDGE_URL}/vision/connect-engine",
-                json={"session_token": session_token, "engine": "vision-ai-v1"},
-                headers=self._headers(),
-                timeout=5,
-            )
-            ok = r.status_code < 300
-            if ok:
-                print(f"[FighterIDAPI] connect-engine OK")
-            else:
-                try:
-                    body = r.json()
-                except Exception:
-                    body = r.text[:200]
-                print(f"[FighterIDAPI] connect-engine FAILED HTTP {r.status_code}: {body}")
-            return ok
-        except Exception as e:
-            print(f"[FighterIDAPI] connect-engine error: {e}")
-            return False
+        # ── Ruta 1: DB directo (más rápido, sin edge function) ────────────
+        db = self._get_db()
+        if db and self._session_id:
+            try:
+                db.table("fight_telemetry_sessions").update({
+                    "vision_connected": True,
+                    "last_heartbeat":   "now()",
+                }).eq("id", self._session_id).execute()
+                print("[FighterIDAPI] connect-engine OK (DB)")
+                return True
+            except Exception as e:
+                print(f"[FighterIDAPI] connect-engine DB error: {e}")
+
+        # ── Ruta 2: POST /log como señal de conexión ───────────────────────
+        ok, _ = self._post("log", {
+            "event":         "vision_connected",
+            "session_token": session_token,
+            "engine":        "vision-ai-v1",
+            "timestamp_ms":  int(time.time() * 1000),
+        })
+        print(f"[FighterIDAPI] connect-engine {'OK' if ok else 'FAILED'} (/log fallback)")
+        return ok
 
     # ------------------------------------------------------------------
     # Public API
@@ -491,8 +498,9 @@ class FighterIDAPI:
                 except Exception as e:
                     print(f"[FighterIDAPI] heartbeat DB error: {e}")
 
-            # Fallback: edge function
-            self._post("heartbeat", {
+            # Fallback: POST /log  (/heartbeat no existe en el backend)
+            self._post("log", {
+                "event":         "heartbeat",
                 "fightId":       self._fight_id,
                 "session_token": self._session_token,
                 "engine":        "vision-ai-v1",
