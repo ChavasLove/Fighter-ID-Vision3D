@@ -126,6 +126,8 @@ B_LO =np.array([90,100,50],np.uint8);  B_HI =np.array([140,255,255],np.uint8)
 W_S_MAX=55; W_V_MIN=160
 SK1_LO=np.array([0,20,60],np.uint8);   SK1_HI=np.array([25,210,255],np.uint8)
 SK2_LO=np.array([0,10,40],np.uint8);   SK2_HI=np.array([20,130,210],np.uint8)
+# Black shirt: dark pixels — V < 60, covers >30% of torso ROI
+BK_V_MAX = 60; BK_RATIO_MIN = 0.30
 
 # GUI hex — sober, minimalist dark palette
 GUI_BG      = "#0a0a0f"; GUI_PANEL   = "#10101a"; GUI_CARD    = "#171720"
@@ -601,6 +603,22 @@ def bare_torso(frame, kp):
         hsv = cv2.cvtColor(sm, cv2.COLOR_BGR2HSV)
         sk  = cv2.bitwise_or(cv2.inRange(hsv,SK1_LO,SK1_HI), cv2.inRange(hsv,SK2_LO,SK2_HI))
         return float(np.sum(sk>0))/(64*64) > 0.15
+    except: return False
+
+def detect_black_shirt(frame, kp):
+    """Returns True if the torso area is predominantly dark/black (black shirt)."""
+    if len(kp) < 13: return False
+    try:
+        pts = [kp[i] for i in [5,6,11,12] if kp[i][0]>0 and kp[i][1]>0]
+        if len(pts) < 3: return False
+        xs=[int(p[0]) for p in pts]; ys=[int(p[1]) for p in pts]
+        H, W = frame.shape[:2]
+        roi = frame[max(0,min(ys)):min(H,max(ys)+20), max(0,min(xs)-10):min(W,max(xs)+10)]
+        if roi.size==0 or roi.shape[0]<12 or roi.shape[1]<12: return False
+        sm  = cv2.resize(roi, (64,64), interpolation=cv2.INTER_LINEAR)
+        hsv = cv2.cvtColor(sm, cv2.COLOR_BGR2HSV)
+        dark = (hsv[:,:,2] < BK_V_MAX)  # Very dark/black pixels
+        return float(np.sum(dark)) / (64*64) > BK_RATIO_MIN
     except: return False
 
 def torso_center_3d(pts3d):
@@ -1535,36 +1553,59 @@ class Fighter:
 #  ROLE DETECTOR
 # ══════════════════════════════════════════════════════════════════
 class RoleDetector:
+    """
+    Detección de roles basada en condiciones visuales:
+      - MODO PRUEBA  : 1 persona con guantes BLANCOS + torso descubierto (sin camiseta)
+      - SESIÓN NORMAL: 2 personas con guantes de box (cualquier color) +
+                       al menos UNA con camiseta NEGRA (→ esquina ROJA);
+                       la otra persona → esquina AZUL
+    """
     def __init__(self):
         self._wins = {}; self.locked = False
         self.test_pid = self.red_pid = self.blue_pid = None; self.mode = "none"
 
     def _ensure(self, pid):
         if pid not in self._wins:
-            self._wins[pid] = {'W': deque(maxlen=VOTE_WINDOW),
-                               'R': deque(maxlen=VOTE_WINDOW),
-                               'B': deque(maxlen=VOTE_WINDOW)}
+            self._wins[pid] = {
+                'W':  deque(maxlen=VOTE_WINDOW),   # guantes blancos + torso descubierto
+                'R':  deque(maxlen=VOTE_WINDOW),   # guantes rojos  (legacy)
+                'B':  deque(maxlen=VOTE_WINDOW),   # guantes azules (legacy)
+                'G':  deque(maxlen=VOTE_WINDOW),   # cualquier guante detectado
+                'BK': deque(maxlen=VOTE_WINDOW),   # camiseta negra
+            }
 
-    def update(self, pid, w_ok, r_ok, b_ok):
+    def update(self, pid, w_ok, r_ok, b_ok, has_glove=False, black_shirt=False):
         if self.locked: return
         self._ensure(pid); d = self._wins[pid]
         d['W'].append(w_ok); d['R'].append(r_ok); d['B'].append(b_ok)
+        d['G'].append(has_glove); d['BK'].append(black_shirt)
 
     def try_confirm(self):
         if self.locked: return False
-        for pid, d in self._wins.items():
-            if pid in (self.test_pid, self.red_pid, self.blue_pid): continue
-            wc=sum(d['W']); rc=sum(d['R']); bc=sum(d['B'])
-            # Modo test: torso sin guantes — NO bloquear, permite seguir detectando roles
-            if wc>=VOTE_NEEDED and wc>=rc and wc>=bc:
-                if self.mode == "none":
-                    self.test_pid=pid; self.mode="test"; return True
-            # Roles por color de guante — funcionan desde cualquier modo
-            if rc>=VOTE_NEEDED and self.red_pid is None:
-                self.red_pid=pid; self.mode="fight"
-            if bc>=VOTE_NEEDED and self.blue_pid is None:
-                self.blue_pid=pid; self.mode="fight"
-        if self.red_pid and self.blue_pid: self.locked = True
+        if self.mode != "none": return False
+
+        bk_thresh = max(8, VOTE_NEEDED // 2)
+
+        # ── SESIÓN NORMAL (prioridad): 2 personas con guantes + 1 camiseta negra ──
+        gloved = [(pid, d) for pid, d in self._wins.items()
+                  if sum(d['G']) >= VOTE_NEEDED]
+        if len(gloved) >= 2:
+            bk_pid = None
+            for pid, d in gloved:
+                if sum(d['BK']) >= bk_thresh:
+                    bk_pid = pid; break
+            if bk_pid is not None:
+                other = [p for p, _ in gloved if p != bk_pid][0]
+                self.red_pid = bk_pid; self.blue_pid = other
+                self.mode = "fight"; self.locked = True
+                return False
+
+        # ── MODO PRUEBA: 1 persona con guantes blancos + torso descubierto ──
+        if len(gloved) <= 1:
+            for pid, d in self._wins.items():
+                if sum(d['W']) >= VOTE_NEEDED:
+                    self.test_pid = pid; self.mode = "test"; return True
+
         return False
 
     def clear(self):
@@ -1744,12 +1785,14 @@ class VisionEngine(threading.Thread):
             bare_r = detect_bare_hand(frame, int(rx), int(ry)) if rv else False
             any_glove = (cL.get('white',False) or cL.get('red',False) or cL.get('blue',False)
                          or cR.get('white',False) or cR.get('red',False) or cR.get('blue',False))
+            _bt = bare_torso(frame, kp)
             gi = {'white': cL.get('white',False) or cR.get('white',False),
                   'red':   cL.get('red',  False) or cR.get('red',  False),
                   'blue':  cL.get('blue', False) or cR.get('blue', False),
-                  'bare':  bare_torso(frame, kp),
+                  'bare':  _bt,
                   'bare_hands': (bare_l or bare_r) and not any_glove,
-                  'has_glove':  any_glove}
+                  'has_glove':  any_glove,
+                  'black_shirt': (not _bt) and detect_black_shirt(frame, kp)}
             persons.append((idx+pid_offset, kp, cf, gi))
         return persons
 
@@ -2387,27 +2430,22 @@ class VisionEngine(threading.Thread):
 
             self._pids = [pid for pid,_,_,_ in persons_a]
 
-            # Auto test-mode: 1 fighter visible for ~2 s with no roles assigned yet
-            if (len(self._pids) == 1
-                    and self.roles.mode == "none"
-                    and not self.roles.locked
-                    and self.session_state == "IDLE"):
+            # Contador de frames solo — reservado para diagnóstico, ya no dispara auto-test.
+            # El modo prueba se activa ahora por el sistema de votos:
+            #   → 1 persona + guantes BLANCOS + torso descubierto → MODO PRUEBA
+            if len(self._pids) == 1 and self.roles.mode == "none":
                 self._solo_frames += 1
-                if self._solo_frames >= 60:
-                    _ap = self._pids[0]
-                    self.roles.force_test(_ap)
-                    self._log(f"MODO TEST automático — 1 peleador detectado (pid={_ap})")
-                    self._solo_frames = 0
             else:
-                if self.roles.mode == "none":
-                    self._solo_frames = 0
+                self._solo_frames = 0
 
             for pid_a, kp_a, cf_a, gi_a in persons_a:
                 bare = gi_a.get('bare', False)
                 self.roles.update(pid_a,
                     w_ok=gi_a.get('white',False) and bare,
                     r_ok=gi_a.get('red',  False) and bare,
-                    b_ok=gi_a.get('blue', False) and bare)
+                    b_ok=gi_a.get('blue', False) and bare,
+                    has_glove=gi_a.get('has_glove', False),
+                    black_shirt=gi_a.get('black_shirt', False))
                 # ── Glove vote tracking (30-frame window) ─────────
                 has_g = gi_a.get('has_glove', False)
                 if pid_a not in self._glove_votes:
@@ -2417,25 +2455,19 @@ class VisionEngine(threading.Thread):
                 self._glove_ok[pid_a] = sum(votes) >= max(8, len(votes) // 2)
             self.roles.try_confirm()
 
-            # ── Status message with glove awareness ───────────────
+            # ── Status message ─────────────────────────────────────
             if self.roles.mode == "test":
-                self._status_msg = "MODO TEST — Presiona INICIAR"
+                self._status_msg = "MODO PRUEBA — Guantes blancos + sin camiseta — Presiona INICIAR"
             elif self.roles.mode == "fight" and self.roles.red_pid and self.roles.blue_pid:
-                rp_ok = self._glove_ok.get(self.roles.red_pid, False)
-                bp_ok = self._glove_ok.get(self.roles.blue_pid, False)
-                if rp_ok and bp_ok:
-                    self._status_msg = "✓ Guantes detectados — Presiona INICIAR"
-                else:
-                    miss = []
-                    if not rp_ok: miss.append("ROJO")
-                    if not bp_ok: miss.append("AZUL")
-                    self._status_msg = f"⚠ Sin guantes: {', '.join(miss)} — Pon guantes para iniciar"
-            elif self.roles.red_pid:
-                self._status_msg = "Esperando esquina AZUL…"
-            elif self.roles.blue_pid:
-                self._status_msg = "Esperando esquina ROJA…"
+                self._status_msg = "✓ 2 peleadores + camiseta negra detectados — Presiona INICIAR"
             else:
-                self._status_msg = "Muestra guantes + torso  |  asigna roles"
+                n_pids = len(self._pids)
+                if n_pids >= 2:
+                    self._status_msg = "2 personas detectadas — pon guantes y camiseta negra para iniciar sesión"
+                elif n_pids == 1:
+                    self._status_msg = "1 persona — guantes BLANCOS + sin camiseta → modo prueba"
+                else:
+                    self._status_msg = "Esperando peleadores… (guantes box + camiseta negra = sesión | guantes blancos + sin camiseta = prueba)"
 
             can_det = self.session_state=="RUNNING" and self.phase=="ROUND"
             rp=self.roles.red_pid; bp=self.roles.blue_pid; tp=self.roles.test_pid
