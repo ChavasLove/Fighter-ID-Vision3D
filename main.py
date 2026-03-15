@@ -104,8 +104,8 @@ DATASET_ENABLED = False
 
 # ── Live Stream — Supabase + RTMP ──────────────────────────────────────────────
 # Configurar via botón ⚙ EN VIVO en la barra lateral o editando fighterid_stream.json
-SUPABASE_URL          = ""   # https://xxxx.supabase.co
-SUPABASE_ANON_KEY     = ""   # eyJ... (clave anon pública)
+SUPABASE_URL          = "https://eeshomcqztvjkvycdfwi.supabase.co"
+SUPABASE_ANON_KEY     = "sb_publishable_3H9okQFv3LCQv3wxsxiwvg_WdF_f25z"
 SUPABASE_TABLE_LIVE   = "live_session"
 SUPABASE_TABLE_ROUNDS = "round_results"
 STREAM_RTMP_URL       = ""   # rtmp://... (YouTube/Twitch/Mux/custom — opcional)
