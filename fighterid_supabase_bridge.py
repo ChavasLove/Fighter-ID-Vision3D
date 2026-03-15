@@ -1,5 +1,5 @@
 """
-FighterID Vision — Supabase Bridge v1.0
+FighterID Vision — Supabase Bridge v1.1
 Reemplaza la clase FighterIDAPI de main.py.
 """
 import threading, time
@@ -38,6 +38,28 @@ class FighterIDAPI:
     def round_number(self): return self._round_num
     @round_number.setter
     def round_number(self, v): self._round_num = v
+
+    def fetch_active_fight(self):
+        """GET /fight/active — returns fight_id str or None if not found."""
+        import main as m
+        if not m.API_ENABLED or not m.FIGHTERID_API_KEY:
+            return None
+        try:
+            r = requests.get(
+                f"{m.FIGHTERID_API_URL}/fight/active",
+                headers=self._headers(),
+                timeout=5,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                fid = data.get("fight_id") or data.get("fightId")
+                if fid:
+                    print(f"[FighterIDAPI] fight/active → fight_id={fid}")
+                    return fid
+            print(f"[FighterIDAPI] fight/active no fight encontrado ({r.status_code})")
+        except Exception as e:
+            print(f"[FighterIDAPI] fight/active error: {e}")
+        return None
 
     def start_session(self, fight_id, fighter_a_name="Rojo", fighter_b_name="Azul", mode="fight"):
         self._fight_id  = fight_id
@@ -118,19 +140,22 @@ class FighterIDAPI:
     def _post(self, path, body, timeout=5):
         import main as m
         if not m.API_ENABLED or not m.FIGHTERID_API_KEY:
-            return False
+            return False, None
         try:
             r = requests.post(f"{self._base_url()}/{path}", json=body, headers=self._headers(), timeout=timeout)
-            return r.status_code < 300
+            data = None
+            try: data = r.json()
+            except Exception: pass
+            return r.status_code < 300, data
         except Exception as e:
             print(f"[FighterIDAPI] POST /{path} error: {e}")
-            return False
+            return False, None
 
     def _worker(self):
         while True:
             if not self._queue: time.sleep(0.02); continue
             evt = self._queue.popleft()
-            ok = self._post("event", evt)
+            ok, _ = self._post("event", evt)
             if ok: self.sent_ok  += 1
             else:  self.sent_err += 1
 
@@ -140,10 +165,13 @@ class FighterIDAPI:
             payload = self._session_queue.popleft()
             action  = payload.pop("_action", "")
             if action == "session_start":
-                ok = self._post("session/start", payload)
-                print(f"[FighterIDAPI] session/start {'OK' if ok else 'FAILED'}")
+                ok, data = self._post("session/start", payload)
+                if ok and data:
+                    self._session_id = data.get("sessionId") or data.get("session_id")
+                print(f"[FighterIDAPI] session/start {'OK' if ok else 'FAILED'}"
+                      + (f" session_id={self._session_id}" if self._session_id else ""))
             elif action == "fight_end":
                 if payload.get("sessionId"):
                     self._post("session/stop", {"sessionId": payload["sessionId"], "stats": payload.get("stats", {})})
-                ok = self._post("fight/end", payload, timeout=10)
+                ok, _ = self._post("fight/end", payload, timeout=10)
                 print(f"[FighterIDAPI] fight/end {'OK' if ok else 'FAILED'} → winner={payload.get('winner_corner')}")

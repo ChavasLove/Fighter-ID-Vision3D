@@ -2010,13 +2010,19 @@ class VisionEngine(threading.Thread):
         self.rnd_stats={}; self.rnd_winners={}; self._reset_ts()
         if DATASET_ENABLED: DATASET.start_session()
         self._log("=== SESIÓN INICIADA ===")
-        import uuid as _uuid
-        _fight_uuid = str(_uuid.uuid4())
+        _mode = "fight" if not self.tm else "test"
+        _fight_uuid = FAPI.fetch_active_fight()
+        if not _fight_uuid:
+            import uuid as _uuid
+            _fight_uuid = str(_uuid.uuid4())
+            self._log(f"[API] Sin pelea activa en BD — usando UUID local: {_fight_uuid}")
+        else:
+            self._log(f"[API] fight_id desde BD: {_fight_uuid}")
         FAPI.start_session(
             fight_id       = _fight_uuid,
             fighter_a_name = "Esquina Roja",
             fighter_b_name = "Esquina Azul",
-            mode           = "fight" if not self.tm else "test",
+            mode           = _mode,
         )
         return True
 
