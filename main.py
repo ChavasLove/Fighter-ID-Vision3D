@@ -13,7 +13,7 @@ v3.6 → v4.0  Upgrade changelog:
 
 pip install customtkinter pillow ultralytics opencv-python numpy torch-directml scipy requests
 """
-import os, subprocess, json, requests, csv, pathlib
+import os, subprocess, json, requests, csv, pathlib, uuid
 os.environ["OPENCV_LOG_LEVEL"]     = "SILENT"
 os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
 import cv2, numpy as np, time, math, datetime, threading
@@ -97,6 +97,17 @@ API_ENABLED       = False
 # Dataset capture
 DATASET_DIR = pathlib.Path("dataset_capture")
 DATASET_ENABLED = False
+
+# ── Live Stream — Supabase + RTMP ──────────────────────────────────────────────
+# Configurar via botón ⚙ EN VIVO en la barra lateral o editando fighterid_stream.json
+SUPABASE_URL          = ""   # https://xxxx.supabase.co
+SUPABASE_ANON_KEY     = ""   # eyJ... (clave anon pública)
+SUPABASE_TABLE_LIVE   = "live_session"
+SUPABASE_TABLE_ROUNDS = "round_results"
+STREAM_RTMP_URL       = ""   # rtmp://... (YouTube/Twitch/Mux/custom — opcional)
+STREAM_FPS_TARGET     = 30
+LIVE_STREAM_ENABLED   = False
+_STREAM_CFG_FILE      = pathlib.Path("fighterid_stream.json")
 
 # OpenCV BGR
 BLK=(8,8,12);    WHT=(255,255,255); GRY=(120,120,120)
@@ -1000,6 +1011,284 @@ class FighterIDAPI:
 FAPI = FighterIDAPI()
 
 # ══════════════════════════════════════════════════════════════════
+#  LIVE STREAM: Supabase + RTMP (FFmpeg)
+# ══════════════════════════════════════════════════════════════════
+
+def _load_stream_config():
+    """Carga credenciales de fighterid_stream.json al arrancar."""
+    global SUPABASE_URL, SUPABASE_ANON_KEY, STREAM_RTMP_URL, STREAM_FPS_TARGET
+    try:
+        if _STREAM_CFG_FILE.exists():
+            cfg = json.loads(_STREAM_CFG_FILE.read_text(encoding='utf-8'))
+            SUPABASE_URL      = cfg.get('supabase_url',      SUPABASE_URL)
+            SUPABASE_ANON_KEY = cfg.get('supabase_anon_key', SUPABASE_ANON_KEY)
+            STREAM_RTMP_URL   = cfg.get('stream_rtmp_url',   STREAM_RTMP_URL)
+            STREAM_FPS_TARGET = int(cfg.get('stream_fps',    STREAM_FPS_TARGET))
+    except Exception as e:
+        print(f"[stream_cfg] No se pudo cargar config: {e}")
+
+def _save_stream_config():
+    """Persiste credenciales en fighterid_stream.json."""
+    try:
+        cfg = {
+            'supabase_url':      SUPABASE_URL,
+            'supabase_anon_key': SUPABASE_ANON_KEY,
+            'stream_rtmp_url':   STREAM_RTMP_URL,
+            'stream_fps':        STREAM_FPS_TARGET,
+        }
+        _STREAM_CFG_FILE.write_text(json.dumps(cfg, indent=2), encoding='utf-8')
+    except Exception as e:
+        print(f"[stream_cfg] No se pudo guardar config: {e}")
+
+_load_stream_config()   # cargar al importar el módulo
+
+
+class SupabaseStreamer:
+    """
+    Envía estadísticas en vivo a Supabase via REST API (compatible con Realtime).
+    El frontend se suscribe a cambios en la tabla live_session y recibe
+    actualizaciones automáticas sin polling.
+    """
+    _HDRS_BASE = {
+        'Content-Type':  'application/json',
+        'Prefer':        'resolution=merge-duplicates,return=minimal',
+    }
+
+    def __init__(self):
+        self._q      = deque(maxlen=300)
+        self._thread = threading.Thread(target=self._worker, daemon=True,
+                                        name="SupabaseStreamer")
+        self._thread.start()
+        self.push_ok  = 0
+        self.push_err = 0
+
+    def _headers(self) -> dict:
+        return {**self._HDRS_BASE,
+                'apikey':        SUPABASE_ANON_KEY,
+                'Authorization': f'Bearer {SUPABASE_ANON_KEY}'}
+
+    def _worker(self):
+        while True:
+            if not self._q:
+                time.sleep(0.08); continue
+            task = self._q.popleft()
+            if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+                continue
+            try:
+                url  = f"{SUPABASE_URL.rstrip('/')}/rest/v1/{task['table']}"
+                meth = task.get('method', 'POST')
+                r    = requests.post(url, json=task['data'],
+                                     headers=self._headers(), timeout=6)
+                if r.status_code in (200, 201): self.push_ok  += 1
+                else:                           self.push_err += 1
+            except Exception:
+                self.push_err += 1
+
+    # ── helpers ──────────────────────────────────────────────────────
+    @staticmethod
+    def _clean(d: dict) -> dict:
+        """Convierte deques y filtra callables para serialización JSON."""
+        out = {}
+        for k, v in d.items():
+            if callable(v):                continue
+            if isinstance(v, deque):       out[k] = list(v)
+            elif isinstance(v, dict):      out[k] = SupabaseStreamer._clean(v)
+            else:                          out[k] = v
+        return out
+
+    def push_live_stats(self, session_id: str, stats: dict):
+        """Upsert estado actual de la pelea en live_session."""
+        if not session_id: return
+        payload = {
+            'session_id':      session_id,
+            'state':           stats.get('state', 'IDLE'),
+            'phase':           stats.get('phase', 'IDLE'),
+            'round_num':       stats.get('rnd', 0),
+            'timer_remaining': stats.get('rem', 0),
+            'scoring_mode':    stats.get('mode', 'fight'),
+            'is_test':         stats.get('mode_tm', False),
+            'eng_fps':         round(stats.get('eng_fps', 0.0), 1),
+            'red':             self._clean(stats.get('red',  {})),
+            'blue':            self._clean(stats.get('blue', {})),
+            'updated_at':      datetime.datetime.utcnow().isoformat() + 'Z',
+        }
+        self._q.append({'method': 'POST', 'table': SUPABASE_TABLE_LIVE,
+                        'data': payload})
+
+    def push_round_result(self, session_id: str, rnd: int, data: dict):
+        """Inserta resultado de un round completado en round_results."""
+        payload = {
+            'session_id': session_id,
+            'round_num':  rnd,
+            'mode':       data.get('mode',     data.get('scoring', 'fight')),
+            'winner':     data.get('winner',   ''),
+            'scorecard':  self._clean(data.get('scorecard', {})),
+            'red_stats':  self._clean(data.get('red',  {})),
+            'blue_stats': self._clean(data.get('blue', {})),
+            'created_at': datetime.datetime.utcnow().isoformat() + 'Z',
+        }
+        self._q.append({'method': 'POST', 'table': SUPABASE_TABLE_ROUNDS,
+                        'data': payload})
+
+    def push_session_end(self, session_id: str, summary: dict):
+        """Marca la sesión como ENDED con el resumen final."""
+        payload = {
+            'session_id': session_id,
+            'state':      'ENDED',
+            'phase':      'IDLE',
+            'summary':    self._clean(summary),
+            'updated_at': datetime.datetime.utcnow().isoformat() + 'Z',
+        }
+        self._q.append({'method': 'POST', 'table': SUPABASE_TABLE_LIVE,
+                        'data': payload})
+
+
+class VideoStreamer:
+    """
+    Codifica frames procesados (con overlay) y los envía via RTMP usando FFmpeg.
+    Compatible con YouTube Live, Twitch, Cloudflare Stream, Mux o cualquier
+    servidor RTMP propio (Nginx-RTMP, SRS, etc.).
+    Requiere FFmpeg instalado en el sistema: https://ffmpeg.org/download.html
+    """
+
+    def __init__(self):
+        self._proc:   subprocess.Popen | None = None
+        self._active: bool = False
+        self._w = CAM_W; self._h = CAM_H
+
+    def start(self, rtmp_url: str, fps: int = 30,
+              width: int = 1920, height: int = 1080) -> tuple[bool, str]:
+        """Inicia el proceso FFmpeg. Retorna (ok, mensaje)."""
+        if not rtmp_url:
+            return False, "URL RTMP vacía"
+        self.stop()
+        self._w = width; self._h = height
+        cmd = [
+            'ffmpeg', '-y', '-loglevel', 'error',
+            # Entrada: frames raw en pipe stdin
+            '-f', 'rawvideo', '-pix_fmt', 'bgr24',
+            '-s', f'{width}x{height}',
+            '-r', str(fps),
+            '-i', 'pipe:0',
+            # Codec: H.264 ultra-fast para mínima latencia
+            '-c:v', 'libx264',
+            '-preset', 'veryfast',
+            '-tune', 'zerolatency',
+            '-b:v', '4M', '-maxrate', '4M', '-bufsize', '8M',
+            '-g', str(fps * 2),   # GOP 2s — recomendado para streaming
+            '-pix_fmt', 'yuv420p',
+            '-f', 'flv',
+            rtmp_url,
+        ]
+        try:
+            self._proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._active = True
+            return True, f"FFmpeg iniciado → {rtmp_url}"
+        except FileNotFoundError:
+            return False, "FFmpeg no encontrado — instala ffmpeg.org"
+        except Exception as e:
+            return False, f"Error FFmpeg: {e}"
+
+    def send_frame(self, bgr_frame) -> bool:
+        """Escribe un frame al pipe de FFmpeg."""
+        if not self._active or self._proc is None: return False
+        try:
+            h, w = bgr_frame.shape[:2]
+            if w != self._w or h != self._h:
+                bgr_frame = cv2.resize(bgr_frame, (self._w, self._h),
+                                       interpolation=cv2.INTER_LINEAR)
+            self._proc.stdin.write(bgr_frame.tobytes())
+            return True
+        except (BrokenPipeError, OSError):
+            self._active = False
+            return False
+
+    def stop(self):
+        self._active = False
+        if self._proc:
+            try:
+                self._proc.stdin.close()
+                self._proc.wait(timeout=4)
+            except Exception: pass
+            self._proc = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._active and self._proc is not None and \
+               self._proc.poll() is None
+
+
+# Instancias globales — controladas desde la GUI
+SUPA  = SupabaseStreamer()
+VSTRM = VideoStreamer()
+
+
+class LiveStreamManager(threading.Thread):
+    """
+    Hilo de fondo que conecta el VisionEngine con Supabase y FFmpeg/RTMP.
+
+    Responsabilidades:
+      · Cada STATS_INTERVAL segundos: upsert stats en live en Supabase.
+      · Al detectar nuevo winner en rnd_winners: push round_result.
+      · Si VideoStreamer activo: alimentar con frames procesados a target FPS.
+    """
+    STATS_INTERVAL = 1.5   # segundos entre pushes de stats
+
+    def __init__(self, engine: 'VisionEngine'):
+        super().__init__(daemon=True, name="LiveStreamMgr")
+        self._engine          = engine
+        self._session_id      = f"fs_{uuid.uuid4().hex[:12]}"
+        self._last_push_t     = 0.0
+        self._seen_rnd_winners: dict = {}
+        self._stop_ev         = threading.Event()
+        # Publicar sesión como INIT en Supabase
+        SUPA.push_live_stats(self._session_id,
+                             {'state': 'INIT', 'phase': 'IDLE', 'rnd': 0,
+                              'rem': 0, 'mode': 'fight', 'mode_tm': False,
+                              'eng_fps': 0.0, 'red': {}, 'blue': {}})
+
+    def run(self):
+        frame_interval = 1.0 / max(STREAM_FPS_TARGET, 1)
+        last_frame_t   = 0.0
+
+        while not self._stop_ev.is_set():
+            now    = time.time()
+            stats  = self._engine.get_stats()
+
+            # ── Stats push ────────────────────────────────────────
+            if stats and (now - self._last_push_t) >= self.STATS_INTERVAL:
+                SUPA.push_live_stats(self._session_id, stats)
+                self._last_push_t = now
+                # Detectar nuevos rounds completados
+                rw = stats.get('rnd_winners', {})
+                for rnd, winner in rw.items():
+                    if rnd not in self._seen_rnd_winners:
+                        rdata = self._engine.get_round_stats().get(rnd, {})
+                        SUPA.push_round_result(self._session_id, rnd, rdata)
+                        self._seen_rnd_winners[rnd] = winner
+
+            # ── Video frame ───────────────────────────────────────
+            if VSTRM.is_running and (now - last_frame_t) >= frame_interval:
+                fa, _, _ = self._engine.get_frames()
+                if fa is not None:
+                    VSTRM.send_frame(fa)
+                last_frame_t = now
+
+            time.sleep(0.010)   # ~100Hz de polling máximo
+
+    def stop(self, summary: dict | None = None):
+        if summary:
+            SUPA.push_session_end(self._session_id, summary)
+        self._stop_ev.set()
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+
+# ══════════════════════════════════════════════════════════════════
 #  HEAD TRACKER
 # ══════════════════════════════════════════════════════════════════
 class HeadTracker:
@@ -1841,6 +2130,10 @@ class VisionEngine(threading.Thread):
     def get_logs(self):
         with self._lock: return list(self._log_msgs)
 
+    def get_round_stats(self) -> dict:
+        """Retorna copia de rnd_stats para el LiveStreamManager (thread-safe vía GIL)."""
+        return dict(self.rnd_stats)
+
     def run(self):
         def open_cap(idx, fps=30):
             """
@@ -2499,6 +2792,85 @@ class CalibDialog(ctk.CTkToplevel):
             self._status.configure(text=f"Error: {e}", text_color=GUI_RED)
 
 # ══════════════════════════════════════════════════════════════════
+#  STREAM CONFIG DIALOG
+# ══════════════════════════════════════════════════════════════════
+class _StreamConfigDialog(ctk.CTkToplevel):
+    """Diálogo de configuración Supabase + RTMP para la transmisión en vivo."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Configuración — EN VIVO · fighter-id.org")
+        self.geometry("560x420")
+        self.resizable(False, False)
+        self.configure(fg_color=GUI_BG)
+        self.grab_set()   # modal
+        self._build()
+
+    def _build(self):
+        pad = dict(padx=20, pady=6)
+
+        ctk.CTkLabel(self, text="⚙  Configuración de Transmisión en Vivo",
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=GUI_CYAN).pack(pady=(18, 4))
+
+        ctk.CTkLabel(self, text="Supabase (estadísticas en tiempo real)",
+                     font=ctk.CTkFont(size=11, weight="bold"),
+                     text_color=GUI_YELLOW).pack(anchor="w", **pad)
+
+        # Supabase URL
+        ctk.CTkLabel(self, text="Project URL  (https://xxxx.supabase.co)",
+                     font=ctk.CTkFont(size=10), text_color=GUI_GRAY).pack(anchor="w", padx=20, pady=(0, 2))
+        self._supa_url = ctk.CTkEntry(self, width=520, placeholder_text="https://xxxx.supabase.co")
+        self._supa_url.pack(padx=20)
+        if SUPABASE_URL:
+            self._supa_url.insert(0, SUPABASE_URL)
+
+        # Supabase Anon Key
+        ctk.CTkLabel(self, text="Anon Key  (eyJ...)",
+                     font=ctk.CTkFont(size=10), text_color=GUI_GRAY).pack(anchor="w", padx=20, pady=(8, 2))
+        self._supa_key = ctk.CTkEntry(self, width=520, placeholder_text="eyJ...", show="*")
+        self._supa_key.pack(padx=20)
+        if SUPABASE_ANON_KEY:
+            self._supa_key.insert(0, SUPABASE_ANON_KEY)
+
+        ctk.CTkLabel(self, text="Video RTMP  (opcional)",
+                     font=ctk.CTkFont(size=11, weight="bold"),
+                     text_color=GUI_YELLOW).pack(anchor="w", padx=20, pady=(14, 2))
+
+        # RTMP URL
+        ctk.CTkLabel(self, text="RTMP URL  (rtmp://...  — YouTube, Twitch, Mux, etc.)",
+                     font=ctk.CTkFont(size=10), text_color=GUI_GRAY).pack(anchor="w", padx=20, pady=(0, 2))
+        self._rtmp_url = ctk.CTkEntry(self, width=520, placeholder_text="rtmp://a.rtmp.youtube.com/live2/xxxx-xxxx")
+        self._rtmp_url.pack(padx=20)
+        if STREAM_RTMP_URL:
+            self._rtmp_url.insert(0, STREAM_RTMP_URL)
+
+        # Status label
+        self._status = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=11), text_color=GUI_GREEN)
+        self._status.pack(pady=(10, 0))
+
+        # Buttons
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(pady=14)
+        ctk.CTkButton(btn_row, text="💾  GUARDAR",
+                      fg_color=GUI_CYAN, text_color=GUI_BG,
+                      font=ctk.CTkFont(size=12, weight="bold"), width=160,
+                      command=self._save).pack(side="left", padx=8)
+        ctk.CTkButton(btn_row, text="✕  CANCELAR",
+                      fg_color=GUI_PANEL, text_color=GUI_WHITE, border_color=GUI_BORDER,
+                      border_width=1, width=120, command=self.destroy).pack(side="left", padx=8)
+
+    def _save(self):
+        global SUPABASE_URL, SUPABASE_ANON_KEY, STREAM_RTMP_URL
+        SUPABASE_URL      = self._supa_url.get().strip()
+        SUPABASE_ANON_KEY = self._supa_key.get().strip()
+        STREAM_RTMP_URL   = self._rtmp_url.get().strip()
+        _save_stream_config()
+        self._status.configure(text="✔  Configuración guardada correctamente", text_color=GUI_GREEN)
+        self.after(1200, self.destroy)
+
+
+# ══════════════════════════════════════════════════════════════════
 #  [10] TELEMETRY PANEL
 # ══════════════════════════════════════════════════════════════════
 class TelemPanel(ctk.CTkFrame):
@@ -2537,10 +2909,12 @@ class FighterIDApp(ctk.CTk):
         try: self.state('zoomed')         # Windows / mayoría de Linux DEs
         except: self.attributes('-zoomed', True)
         self._engine: VisionEngine = None
+        self._live:   LiveStreamManager = None
         self._running = False
         self._sel_a = self._sel_b = self._sel_c = None
         self._build_ui()
         self.after(300, self._init_cameras)
+        self.after(2000, self._refresh_live_status)  # actualizar etiqueta de stats
 
     def _build_ui(self):
         top = ctk.CTkFrame(self, height=52, fg_color=GUI_PANEL, corner_radius=0)
@@ -2683,6 +3057,27 @@ class FighterIDApp(ctk.CTk):
                                         font=ctk.CTkFont(size=9), text_color=GUI_GRAY,
                                         wraplength=185, justify="left")
         self._status_lbl.pack(padx=14, anchor="w", pady=(4,0))
+        sep(); lbl("EN VIVO  ·  fighter-id.org")
+        self._live_btn = ctk.CTkButton(
+            parent, text="🔴  EN VIVO: OFF",
+            fg_color="#1a0808", text_color=GUI_RED,
+            border_color="#602020", border_width=1,
+            hover_color="#2a0d0d",
+            command=self._cmd_live_toggle,
+            **B)
+        self._live_btn.pack(fill="x", padx=12, pady=2)
+        ctk.CTkButton(
+            parent, text="⚙  CONFIGURAR STREAM",
+            fg_color=GUI_PANEL, text_color=GUI_GRAY,
+            border_color=GUI_BORDER, border_width=1,
+            hover_color=GUI_CARD,
+            command=self._cmd_live_config,
+            **B).pack(fill="x", padx=12, pady=2)
+        self._live_stat_lbl = ctk.CTkLabel(
+            parent, text="Supabase: —  |  RTMP: —",
+            font=ctk.CTkFont("Courier New", 8), text_color=GUI_GRAY,
+            wraplength=185, justify="left")
+        self._live_stat_lbl.pack(padx=14, anchor="w", pady=(2,0))
         sep(); lbl("REGISTRO")
         self._log_box = ctk.CTkTextbox(parent, fg_color=GUI_CARD, text_color=GUI_GRAY,
                                        font=ctk.CTkFont("Courier New",8),
@@ -3039,8 +3434,70 @@ class FighterIDApp(ctk.CTk):
         except Exception as e:
             print(f"[baseline] {e}")
 
+    # ── Live Stream controls ───────────────────────────────────────────────────
+
+    def _cmd_live_toggle(self):
+        global LIVE_STREAM_ENABLED
+        if not self._engine:
+            self._top_status.configure(
+                text="⚠ Aplica cámaras antes de activar EN VIVO", text_color=GUI_YELLOW)
+            return
+
+        if self._live and self._live.is_alive():
+            # ── DETENER ────────────────────────────────────────────
+            self._live.stop()
+            VSTRM.stop()
+            self._live = None
+            LIVE_STREAM_ENABLED = False
+            self._live_btn.configure(text="🔴  EN VIVO: OFF",
+                                     fg_color="#1a0808", text_color=GUI_RED,
+                                     border_color="#602020")
+            self._log_entry("Stream en vivo detenido")
+        else:
+            # ── INICIAR ────────────────────────────────────────────
+            if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+                self._cmd_live_config()   # abrir configuración primero
+                return
+            self._live = LiveStreamManager(self._engine)
+            self._live.start()
+            LIVE_STREAM_ENABLED = True
+            # Iniciar RTMP solo si hay URL configurada
+            if STREAM_RTMP_URL:
+                ok, msg = VSTRM.start(STREAM_RTMP_URL, STREAM_FPS_TARGET)
+                self._log_entry(f"RTMP: {msg}")
+            self._live_btn.configure(text="🔴  EN VIVO: ON",
+                                     fg_color="#1a0000", text_color="#ff4040",
+                                     border_color="#ff2020")
+            self._log_entry(f"Stream iniciado · sesión {self._live.session_id}")
+
+    def _cmd_live_config(self):
+        """Abre el diálogo de configuración de Supabase + RTMP."""
+        _StreamConfigDialog(self)
+
+    def _refresh_live_status(self):
+        """Actualiza el label de estado de Supabase/RTMP cada 3 segundos."""
+        try:
+            supa_txt = f"OK:{SUPA.push_ok} ERR:{SUPA.push_err}"
+            rtmp_txt = "ON" if VSTRM.is_running else "—"
+            self._live_stat_lbl.configure(
+                text=f"Supabase: {supa_txt}  |  RTMP: {rtmp_txt}",
+                text_color=GUI_GREEN if SUPA.push_ok > 0 and SUPA.push_err == 0
+                           else (GUI_YELLOW if SUPA.push_ok > 0 else GUI_GRAY))
+        except Exception: pass
+        self.after(3000, self._refresh_live_status)
+
+    def _log_entry(self, msg: str):
+        """Añade entrada al log de la GUI."""
+        if hasattr(self, '_log_box'):
+            self._log_box.configure(state="normal")
+            self._log_box.insert("end", f"[live] {msg}\n")
+            self._log_box.see("end")
+            self._log_box.configure(state="disabled")
+
     def _on_close(self):
         self._running = False
+        if self._live:
+            self._live.stop(); VSTRM.stop()
         if self._engine: self._engine.cmd_stop()
         DATASET.stop_session()
         time.sleep(0.3); self.destroy()
