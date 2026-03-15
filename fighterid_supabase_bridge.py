@@ -217,7 +217,14 @@ class FighterIDAPI:
                 timeout=5,
             )
             ok = r.status_code < 300
-            print(f"[FighterIDAPI] connect-engine {'OK' if ok else 'FAILED'}")
+            if ok:
+                print(f"[FighterIDAPI] connect-engine OK")
+            else:
+                try:
+                    body = r.json()
+                except Exception:
+                    body = r.text[:200]
+                print(f"[FighterIDAPI] connect-engine FAILED HTTP {r.status_code}: {body}")
             return ok
         except Exception as e:
             print(f"[FighterIDAPI] connect-engine error: {e}")
@@ -363,6 +370,8 @@ class FighterIDAPI:
                 data = r.json()
             except Exception:
                 data = {}
+            if not ok:
+                print(f"[FighterIDAPI] POST /{path} HTTP {r.status_code}: {data}")
             return ok, data
         except Exception as e:
             print(f"[FighterIDAPI] POST /{path} error: {e}")
@@ -399,7 +408,18 @@ class FighterIDAPI:
                 self.sent_ok += 1
                 return
             except Exception as e:
-                print(f"[FighterIDAPI] DB insert error: {e}")
+                err = e
+                if hasattr(e, 'args') and e.args:
+                    err_str = str(e.args[0])
+                else:
+                    err_str = str(e)
+                # PGRST204 = column not found in schema cache → run migration
+                if "PGRST204" in err_str or "event_type" in err_str:
+                    print(f"[FighterIDAPI] DB insert error: {e}")
+                    print("[FighterIDAPI] ACCION REQUERIDA: ejecuta supabase_migration_event_type.sql")
+                    print("[FighterIDAPI] en el SQL Editor de Supabase para agregar la columna event_type")
+                else:
+                    print(f"[FighterIDAPI] DB insert error: {e}")
 
         # Fallback: strip private keys and send via edge function
         edge_evt = {k: v for k, v in evt.items() if not k.startswith("_")}
@@ -435,8 +455,12 @@ class FighterIDAPI:
                     self._session_id = (data.get("sessionId")
                                         or data.get("session_id")
                                         or self._session_id)
-                print(f"[FighterIDAPI] session/start {'OK' if ok else 'FAILED'}"
-                      + (f" session_id={self._session_id}" if self._session_id else ""))
+                    print(f"[FighterIDAPI] session/start OK"
+                          + (f" session_id={self._session_id}" if self._session_id else ""))
+                else:
+                    print(f"[FighterIDAPI] session/start FAILED"
+                          + (f" session_id={self._session_id}" if self._session_id else "")
+                          + (f" resp={data}" if data else ""))
 
             elif action == "fight_end":
                 if payload.get("sessionId"):
