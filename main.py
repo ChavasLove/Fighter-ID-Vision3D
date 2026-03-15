@@ -546,10 +546,12 @@ class InferThread(threading.Thread):
                     print(f"[{self.name}] GPU failed ({e_gpu}), falling back to CPU")
                     _cpu_fallback = True
                 try:
-                    r = self.model(f, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False, device="cpu")
+                    # Use explicit CPU fallback — do NOT pass device="cpu" when DML is active
+                    # (it causes a second error); let YOLO use its current device binding
+                    r = self.model(f, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False)
                     with self._lk: self._rout = r
                 except Exception as e2:
-                    print(f"[{self.name}] CPU also failed: {e2}")
+                    print(f"[{self.name}] inference failed: {e2}")
             self.last_latency_ms = (time.perf_counter() - t0) * 1000
             self.total_infers += 1
 
@@ -2430,6 +2432,17 @@ class VisionEngine(threading.Thread):
         model_a = YOLO("yolov8n-pose.pt")
         model_b = YOLO("yolov8n-pose.pt")
         model_c = YOLO("yolov8n-pose.pt")
+        # Move models to GPU — DML (AMD/Intel) or CUDA (NVIDIA)
+        # CRITICAL: _DML_DEV must be applied here; YOLO() defaults to CPU
+        if _DEVICE == "dml":
+            try:
+                model_a.to(_DML_DEV); model_b.to(_DML_DEV); model_c.to(_DML_DEV)
+                print("[GPU] Modelos YOLO → AMD GPU (DirectML)")
+            except Exception as _e_dml:
+                print(f"[GPU] DirectML falló al mover modelos: {_e_dml} → usando CPU")
+        elif _DEVICE == "cuda":
+            model_a.to("cuda"); model_b.to("cuda"); model_c.to("cuda")
+            print("[GPU] Modelos YOLO → NVIDIA GPU (CUDA)")
 
         # [1] THREE independent inference threads — each with its own model
         # to avoid 'Conv has no attribute bn' race condition during first inference
