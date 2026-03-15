@@ -92,6 +92,7 @@ SCORING_PUNCH_TYPES = {"JAB", "CROSS", "HOOK", "UPPERCUT", "OVERHAND", "BODYSHOT
 # FighterID Platform API
 SUPABASE_URL      = "https://eeshomcqztvjkvycdfwi.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVlc2hvbWNxenR2amt2eWNkZndpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYyNDUyMDAsImV4cCI6MjA3MTgyMTIwMH0.JbOPpqzJvzojVRP3hV4QuDeetzRVpRxoaZeBAXrCb2c"
+FIGHTERID_EDGE_URL = f"{SUPABASE_URL}/functions/v1"
 FIGHTERID_API_URL  = f"{SUPABASE_URL}/functions/v1/ai-strike-ingest"
 FIGHTERID_API_KEY  = SUPABASE_ANON_KEY
 API_ENABLED        = True
