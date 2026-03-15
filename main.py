@@ -1814,7 +1814,7 @@ class VisionEngine(threading.Thread):
         cap_a = open_cap(self.cam_a_idx, fps_of(self.cam_a_idx, 60))
         cap_b = (open_cap(self.cam_b_idx, fps_of(self.cam_b_idx, 60))
                  if self.cam_b_idx is not None else None)
-        cap_c = (open_cap(self.cam_c_idx, fps_of(self.cam_c_idx, 30))
+        cap_c = (open_cap(self.cam_c_idx, fps_of(self.cam_c_idx, 60))   # Razer soporta 60fps
                  if self.cam_c_idx is not None else None)
 
         if not cap_a.isOpened():
@@ -2400,7 +2400,9 @@ class FighterIDApp(ctk.CTk):
         self.title("FighterID Vision v4.2  —  3-Camera · Kalman · Hungarian · Pro Boxing")
         self.configure(fg_color=GUI_BG)
         sw=self.winfo_screenwidth(); sh=self.winfo_screenheight()
-        self.geometry(f"{min(sw,1440)}x{min(sh,920)}+0+0")
+        self.geometry(f"{sw}x{sh}+0+0")
+        try: self.state('zoomed')         # Windows / mayoría de Linux DEs
+        except: self.attributes('-zoomed', True)
         self._engine: VisionEngine = None
         self._running = False
         self._sel_a = self._sel_b = self._sel_c = None
@@ -2558,20 +2560,31 @@ class FighterIDApp(ctk.CTk):
         cam_row = ctk.CTkFrame(parent, fg_color="transparent")
         cam_row.pack(fill="both", expand=True, padx=4, pady=(4,2))
         self._cam_lbls = []
-        for title, color in [
+        self._cam_title_lbls = []   # referencias para actualizar tras "Aplicar"
+        self._cam_info_lbls  = []   # subtítulo: [índice] nombre  fps
+        _CAM_DEFS = [
             ("CAM A  ·  IA + KALMAN", GUI_GREEN),
             ("CAM B  ·  DEPTH REF",   GUI_MAGENTA),
             ("CAM C  ·  BROADCAST",   GUI_CYAN),
-        ]:
+        ]
+        for title, color in _CAM_DEFS:
             f = ctk.CTkFrame(cam_row, fg_color=GUI_CARD, corner_radius=10)
             f.pack(side="left", fill="both", expand=True, padx=3)
-            ctk.CTkLabel(f, text=title,
-                         font=ctk.CTkFont(size=9,weight="bold"),
-                         text_color=color).pack(pady=(6,2))
+            tl = ctk.CTkLabel(f, text=title,
+                              font=ctk.CTkFont(size=9,weight="bold"),
+                              text_color=color)
+            tl.pack(pady=(6,0))
+            self._cam_title_lbls.append(tl)
+            # subtítulo con índice + nombre real del dispositivo (se completa al aplicar)
+            il = ctk.CTkLabel(f, text="—  esperando cámaras…",
+                              font=ctk.CTkFont("Courier New", 8),
+                              text_color=GUI_GRAY)
+            il.pack(pady=(0,2))
+            self._cam_info_lbls.append(il)
             lbl = ctk.CTkLabel(f, text="", fg_color=GUI_BLACK)
             lbl.pack(fill="both", expand=True, padx=4, pady=(0,4))
             self._cam_lbls.append(lbl)
-        stats_bar = ctk.CTkFrame(parent, fg_color=GUI_PANEL, height=260, corner_radius=0)
+        stats_bar = ctk.CTkFrame(parent, fg_color=GUI_PANEL, height=180, corner_radius=0)
         stats_bar.pack(fill="x"); stats_bar.pack_propagate(False)
         info = ctk.CTkFrame(stats_bar, fg_color="transparent", height=32)
         info.pack(fill="x", padx=14, pady=(6,0)); info.pack_propagate(False)
@@ -2681,11 +2694,36 @@ class FighterIDApp(ctk.CTk):
         self._engine = VisionEngine(self._sel_a, self._sel_b, self._sel_c, DEFAULT_BASELINE)
         self._engine.start()
         self._running = True
-        self.after(50, self._update_gui)
+        self._update_cam_titles()          # actualiza encabezados con índice/nombre/fps
+        self.after(16, self._update_gui)
         # Re-enable button after startup time (YOLO load + camera warmup ~10s)
         self.after(12000, lambda: (
             self._apply_btn.configure(state="normal", text="⟳  APLICAR CÁMARAS")
             if hasattr(self, '_apply_btn') else None))
+
+    def _update_cam_titles(self):
+        """Actualiza los encabezados de las 3 vistas con el índice y nombre real del dispositivo."""
+        cam_map = {c['index']: c for c in ALL_CAMERAS}
+        roles   = ["IA + KALMAN", "DEPTH REF", "BROADCAST"]
+        letters = ["A", "B", "C"]
+        slots   = [self._sel_a, self._sel_b, self._sel_c]
+        colors  = [GUI_GREEN, GUI_MAGENTA, GUI_CYAN]
+        for i, (idx, role, letter, color) in enumerate(zip(slots, roles, letters, colors)):
+            if idx is not None and idx in cam_map:
+                c    = cam_map[idx]
+                name = c.get('name', f'Cámara {idx}')
+                fps  = int(round(c.get('fps', 0)))
+                w, h = c.get('w', 0), c.get('h', 0)
+                self._cam_title_lbls[i].configure(
+                    text=f"CAM {letter}  ·  {role}")
+                self._cam_info_lbls[i].configure(
+                    text=f"[{idx}] {name}   {w}×{h}  {fps}fps",
+                    text_color=color)
+            else:
+                self._cam_title_lbls[i].configure(
+                    text=f"CAM {letter}  ·  {role}")
+                self._cam_info_lbls[i].configure(
+                    text="— sin cámara —", text_color=GUI_GRAY)
 
     def _update_gui(self):
         if not self._running or self._engine is None: return
@@ -2757,7 +2795,7 @@ class FighterIDApp(ctk.CTk):
             for msg in logs[-14:]: self._log_box.insert("end", msg+"\n")
             self._log_box.see("end")
             self._log_box.configure(state="disabled")
-        self.after(50, self._update_gui)
+        self.after(16, self._update_gui)   # ~60fps display
 
     @staticmethod
     def _set_frame(lbl, bgr):
