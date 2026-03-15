@@ -249,7 +249,6 @@ class FighterIDAPI:
         payload = {
             "_action":        "session_start",
             "fightId":        fight_id,
-            "session_token":  self._session_token,
             "source":         "Fighter ID Vision v4.2",
             "model":          "yolov8-pose",
             "model_version":  "v4.2",
@@ -258,6 +257,8 @@ class FighterIDAPI:
                 "B": self._fighter_blue_name,
             },
         }
+        if self._session_token:
+            payload["session_token"] = self._session_token
         self._session_queue.append(payload)
         print(f"[FighterIDAPI] Sesión iniciada → fight_id={fight_id}")
 
@@ -269,7 +270,6 @@ class FighterIDAPI:
             "_action":        "fight_end",
             "fightId":        self._fight_id,
             "sessionId":      self._session_id,
-            "session_token":  self._session_token,
             "winner":         _FIGHTER_MAP.get(winner, "draw"),
             "winner_corner":  winner,
             "method":         "decision",
@@ -280,6 +280,8 @@ class FighterIDAPI:
             "total_rounds":   3,
             "stats":          {"total_frames": 0, "avg_fps": 0.0, "avg_latency_ms": 0.0},
         }
+        if self._session_token:
+            payload["session_token"] = self._session_token
         self._session_queue.append(payload)
         print(f"[FighterIDAPI] Pelea finalizada → winner={winner} fight_id={self._fight_id}")
         self._fight_id = None
@@ -309,7 +311,6 @@ class FighterIDAPI:
             "_fighter_corner": fighter_id,          # "red" | "blue"
             # Edge-function / legacy fields
             "fightId":        self._fight_id,
-            "session_token":  self._session_token,
             "round":          self._round_num,
             "timestamp_ms":   int(time.time() * 1000),
             "fighter":        fighter_slot,
@@ -326,6 +327,8 @@ class FighterIDAPI:
                 "original_type": punch_type,
             },
         }
+        if self._session_token:
+            evt["session_token"] = self._session_token
         self._queue.append(evt)
 
     # ------------------------------------------------------------------
