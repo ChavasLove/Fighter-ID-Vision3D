@@ -56,8 +56,8 @@ cv2.ocl.setUseOpenCL(False)
 # ══════════════════════════════════════════════════════════════════
 #  VERSION  —  actualizar en cada push significativo
 # ══════════════════════════════════════════════════════════════════
-BUILD_VERSION = "v4.2"
-BUILD_DATE    = "2026-03-14"          # YYYY-MM-DD del último push
+BUILD_VERSION = "v4.3"
+BUILD_DATE    = "2026-03-15"          # YYYY-MM-DD del último push
 
 # ══════════════════════════════════════════════════════════════════
 #  CONFIG
@@ -818,6 +818,32 @@ class AggressivenessScorer:
         else:        return (8 if abs(diff) > 15 else 9), 10
 
     @staticmethod
+    def compute_qualification(round_raw_scores: list) -> dict:
+        """
+        Calificación de sesión para FIGHT mode.
+        Los raw_scores de AggressivenessScorer ya están en rango 0-100,
+        por lo que NO se divide por 1.2 (a diferencia de BoxingScorer).
+        """
+        if not round_raw_scores:
+            return {'grade': '—', 'score': 0.0, 'label': 'Sin datos',
+                    'rounds_scored': 0, 'avg_raw': 0.0}
+        avg = sum(round_raw_scores) / len(round_raw_scores)
+        normalized = min(round(avg, 1), 100.0)   # ya está en 0-100
+        if   normalized >= 85: grade, label = 'S', 'Élite'
+        elif normalized >= 70: grade, label = 'A', 'Excelente'
+        elif normalized >= 55: grade, label = 'B', 'Bueno'
+        elif normalized >= 40: grade, label = 'C', 'Adecuado'
+        elif normalized >= 25: grade, label = 'D', 'En progreso'
+        else:                  grade, label = 'F', 'Necesita trabajo'
+        return {
+            'grade':         grade,
+            'score':         normalized,
+            'label':         label,
+            'rounds_scored': len(round_raw_scores),
+            'avg_raw':       round(avg, 2),
+        }
+
+    @staticmethod
     def generate_scorecard_text(rnd: int, r_data: dict, b_data: dict,
                                 r_sc: dict, b_sc: dict,
                                 pts_r: int, pts_b: int) -> str:
@@ -1535,7 +1561,7 @@ class VisionEngine(threading.Thread):
             self._reset_ts()
             self._log(f"Round {self.rnd}: TEST — {self.red.strikes} golpes, {acc:.1f}%  "
                       f"Poder:{self.red.power_strikes} Combos:{self.red.combo_count}")
-            self._emit_round_report(self.rnd, "test", None, t_round_end)
+            self._emit_round_report(self.rnd, "test", self.rnd_stats[self.rnd], t_round_end)
         else:
             # ── FIGHT MODE: Agresividad + Evasión (sin conteo de golpes) ──────────
             r_stats = self._build_fighter_stat_dict(self.red)
@@ -1624,8 +1650,13 @@ class VisionEngine(threading.Thread):
                     elif w == 'blue': blue_wins += 1
                     elif w == 'draw': draws     += 1
 
-            q_red  = BoxingScorer.compute_qualification(red_raw_scores)
-            q_blue = BoxingScorer.compute_qualification(blue_raw_scores) if not is_test else None
+            if is_test:
+                q_red  = BoxingScorer.compute_qualification(red_raw_scores)
+                q_blue = None
+            else:
+                # FIGHT mode: scores ya están en rango 0-100 (AggressivenessScorer)
+                q_red  = AggressivenessScorer.compute_qualification(red_raw_scores)
+                q_blue = AggressivenessScorer.compute_qualification(blue_raw_scores)
 
             if is_test:
                 final_summary = {
@@ -1737,17 +1768,37 @@ class VisionEngine(threading.Thread):
             self.session_state="RUNNING"; self._log("Resume")
 
     def cmd_end_round(self):
-        if self.session_state in ("RUNNING","PAUSED") and self.phase=="ROUND":
-            self._end_round(); self.rnd_done+=1
+        if self.session_state not in ("RUNNING","PAUSED") or self.phase != "ROUND":
+            return
+        self._end_round()
+        self.rnd_done += 1
+        if self.rnd_done >= TOTAL_ROUNDS:
+            # Última ronda: cerrar sesión
+            self._log("=== SESIÓN TERMINADA ===")
+            self._emit_session_report()
+            if DATASET_ENABLED: DATASET.stop_session()
+            self.session_state = "IDLE"; self.phase = "IDLE"
+        else:
+            # Transición a descanso — impide que el auto-advance dispare _end_round() de nuevo
+            self.phase = "REST"
+            self.t_start = time.time(); self.t_paused = 0.0
+            self.session_state = "RUNNING"
+            self._log(f"Round {self.rnd} finalizado — descanso ({REST_TIME}s)")
 
     def cmd_end_session(self):
         """Terminate session early and emit reports for ALL rounds (played + skipped)."""
         if self.session_state not in ("RUNNING", "PAUSED"):
             return
-        # End current round if one is active
+        # End current round only if it had meaningful activity
         if self.phase == "ROUND":
-            self._end_round()
-            self.rnd_done += 1
+            has_activity = (self.red.aggr > 0 or self.red.strikes > 0
+                            or self.blue.aggr > 0 or self.blue.strikes > 0)
+            if has_activity:
+                self._end_round()
+                self.rnd_done += 1
+            else:
+                self._log(f"Round {self.rnd} descartado (sin actividad registrada)")
+                self.phase = "IDLE"
         # Emit skipped-round reports for rounds not yet played
         ts_now = datetime.datetime.now().isoformat()
         self.red.reset(); self.blue.reset()   # zero stats so skipped reports are clean
@@ -2309,13 +2360,14 @@ class VisionEngine(threading.Thread):
                     'kinetic_chain':self.red.kinetic_chain_avg(),
                     'scoring_mode': 'test' if self.tm else 'fight',       # nuevo
                 },
-                'blue':{
+                # En TEST mode no hay esquina azul — dict vacío → GUI muestra "—"
+                'blue': {} if self.tm else {
                     'strikes':self.blue.strikes,'connected':self.blue.connected,
                     'face_hits':self.blue.face_hits,'body_hits':self.blue.body_hits,
                     'accuracy':self.blue.accuracy(),
                     'max_spd':round(self.blue.max_spd_ms,2),'max_ext':round(self.blue.max_ext_m,2),
                     'agility':self.blue.head.agility(),'dodges':self.blue.head.dodges,
-                    'aggression':self.blue.aggr,                          # nuevo
+                    'aggression':self.blue.aggr,
                     'score':round(self._score(self.blue),1),
                     'ptypes':dict(self.blue.ptypes),
                     'power_strikes':self.blue.power_strikes,
@@ -2325,7 +2377,7 @@ class VisionEngine(threading.Thread):
                     'glove_ok':self._glove_ok.get(self.roles.blue_pid, False),
                     'punch_balance':self.blue.punch_balance(),
                     'kinetic_chain':self.blue.kinetic_chain_avg(),
-                    'scoring_mode': 'test' if self.tm else 'fight',       # nuevo
+                    'scoring_mode': 'fight',
                 },
                 'rnd_winners':dict(self.rnd_winners),
                 'n_3d':n_3d,'n_kp':n_total,'baseline':self.stereo_ab.B,
@@ -2478,7 +2530,7 @@ class FighterIDApp(ctk.CTk):
         super().__init__()
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
-        self.title("FighterID Vision v4.2  —  3-Camera · Kalman · Hungarian · Pro Boxing")
+        self.title("FighterID Vision v4.3  —  3-Camera · Kalman · Hungarian · Pro Boxing")
         self.configure(fg_color=GUI_BG)
         sw=self.winfo_screenwidth(); sh=self.winfo_screenheight()
         self.geometry(f"{sw}x{sh}+0+0")
@@ -2493,7 +2545,7 @@ class FighterIDApp(ctk.CTk):
     def _build_ui(self):
         top = ctk.CTkFrame(self, height=52, fg_color=GUI_PANEL, corner_radius=0)
         top.pack(fill="x", side="top"); top.pack_propagate(False)
-        ctk.CTkLabel(top, text="FIGHTER ID  v4.2",
+        ctk.CTkLabel(top, text="FIGHTER ID  v4.3",
                      font=ctk.CTkFont("Courier New",16,weight="bold"),
                      text_color=GUI_CYAN).pack(side="left", padx=18, pady=12)
         self._top_status = ctk.CTkLabel(top, text="Escaneando...",
