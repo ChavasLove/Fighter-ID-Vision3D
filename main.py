@@ -40,11 +40,34 @@ except ImportError:
         import torch
         if torch.cuda.is_available():
             _DEVICE = "cuda"
-            print(f"[GPU] CUDA: {torch.cuda.get_device_name(0)}")
+            print(f"[GPU] CUDA: {torch.cuda.get_device_name(0)}"
+                  f"  VRAM={torch.cuda.get_device_properties(0).total_memory//1024**2}MB"
+                  f"  CUDAv{torch.version.cuda}")
         else:
+            # Diagnóstico detallado — ayuda al usuario a saber qué instalar
+            _cuda_built = getattr(torch.version, 'cuda', None)
             print("[CPU] sin GPU acelerada")
+            if _cuda_built is None:
+                print("      ⚠ PyTorch instalado SIN soporte CUDA (versión CPU-only)")
+                print("      → Reinstala con CUDA para activar la GPU NVIDIA:")
+                print("        pip uninstall torch torchvision torchaudio -y")
+                print("        pip install torch torchvision torchaudio "
+                      "--index-url https://download.pytorch.org/whl/cu121")
+            else:
+                import ctypes, sys
+                _nv = None
+                try:
+                    _nv = ctypes.windll.nvcuda.cuInit
+                    print(f"      PyTorch compilado para CUDA {_cuda_built} "
+                          f"pero el driver NVIDIA no responde correctamente")
+                    print(f"      → Actualiza el driver NVIDIA desde: "
+                          f"https://www.nvidia.com/Download/index.aspx")
+                except Exception:
+                    print(f"      PyTorch compilado para CUDA {_cuda_built} "
+                          f"pero no detecta GPU NVIDIA instalada")
+                    print(f"      → Verifica que los drivers NVIDIA estén instalados")
     except ImportError:
-        print("[CPU] torch no disponible")
+        print("[CPU] torch no disponible — instala: pip install torch")
 try:
     import torch
     torch.set_num_threads(4)
@@ -523,10 +546,12 @@ class InferThread(threading.Thread):
                     print(f"[{self.name}] GPU failed ({e_gpu}), falling back to CPU")
                     _cpu_fallback = True
                 try:
-                    r = self.model(f, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False, device="cpu")
+                    # Use explicit CPU fallback — do NOT pass device="cpu" when DML is active
+                    # (it causes a second error); let YOLO use its current device binding
+                    r = self.model(f, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False)
                     with self._lk: self._rout = r
                 except Exception as e2:
-                    print(f"[{self.name}] CPU also failed: {e2}")
+                    print(f"[{self.name}] inference failed: {e2}")
             self.last_latency_ms = (time.perf_counter() - t0) * 1000
             self.total_infers += 1
 
@@ -2407,6 +2432,17 @@ class VisionEngine(threading.Thread):
         model_a = YOLO("yolov8n-pose.pt")
         model_b = YOLO("yolov8n-pose.pt")
         model_c = YOLO("yolov8n-pose.pt")
+        # Move models to GPU — DML (AMD/Intel) or CUDA (NVIDIA)
+        # CRITICAL: _DML_DEV must be applied here; YOLO() defaults to CPU
+        if _DEVICE == "dml":
+            try:
+                model_a.to(_DML_DEV); model_b.to(_DML_DEV); model_c.to(_DML_DEV)
+                print("[GPU] Modelos YOLO → AMD GPU (DirectML)")
+            except Exception as _e_dml:
+                print(f"[GPU] DirectML falló al mover modelos: {_e_dml} → usando CPU")
+        elif _DEVICE == "cuda":
+            model_a.to("cuda"); model_b.to("cuda"); model_c.to("cuda")
+            print("[GPU] Modelos YOLO → NVIDIA GPU (CUDA)")
 
         # [1] THREE independent inference threads — each with its own model
         # to avoid 'Conv has no attribute bn' race condition during first inference
