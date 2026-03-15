@@ -505,8 +505,7 @@ class InferThread(threading.Thread):
             if f is None: continue
             t0 = time.perf_counter()
             try:
-                dev = 0 if _DEVICE == "dml" else _DEVICE
-                r = self.model(f, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False, device=dev)
+                r = self.model(f, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False)
                 if _cpu_fallback:
                     print(f"[{self.name}] GPU recovered"); _cpu_fallback = False
                 with self._lk: self._rout = r
@@ -2201,12 +2200,15 @@ class VisionEngine(threading.Thread):
 
         print(f"[VisionEngine] iniciando A={self.cam_a_idx} B={self.cam_b_idx} C={self.cam_c_idx}")
         self._log(f"Cargando YOLO pose (device={_DEVICE})...")
-        model = YOLO("yolov8n-pose.pt")
+        model_a = YOLO("yolov8n-pose.pt")
+        model_b = YOLO("yolov8n-pose.pt")
+        model_c = YOLO("yolov8n-pose.pt")
 
-        # [1] THREE independent inference threads
-        inf_a = InferThread(model, "InferA")
-        inf_b = InferThread(model, "InferB")
-        inf_c = InferThread(model, "InferC")
+        # [1] THREE independent inference threads — each with its own model
+        # to avoid 'Conv has no attribute bn' race condition during first inference
+        inf_a = InferThread(model_a, "InferA")
+        inf_b = InferThread(model_b, "InferB")
+        inf_c = InferThread(model_c, "InferC")
         inf_a.start(); inf_b.start(); inf_c.start()
 
         cap_a = open_cap(self.cam_a_idx, fps_of(self.cam_a_idx, 60))
