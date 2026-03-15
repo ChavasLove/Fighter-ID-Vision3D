@@ -1,6 +1,18 @@
+# Python
 venv/
 __pycache__/
 *.pyc
 *.pyo
+
+# Temp / logs
 *.log
 *.tmp
+
+# Fight reports
+round_report_*.json
+session_report_*.json
+fight_report_*.json
+report_*.json
+
+# Models
+*.pt
