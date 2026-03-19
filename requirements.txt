@@ -5,6 +5,9 @@
 opencv-python>=4.8.0
 ultralytics>=8.0.0          # YOLOv8
 
+# GPU inference — AMD DirectML (vision_motor_v1.py)
+onnxruntime-directml>=1.16.0   # ONNX + DirectML para AMD GPU
+
 # Supabase
 supabase>=2.0.0             # Python client (supabase-py)
 
