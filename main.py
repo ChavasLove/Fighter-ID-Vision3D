@@ -71,6 +71,7 @@ except ImportError:
 try:
     import torch
     torch.set_num_threads(4)
+    print("CUDA:", torch.cuda.is_available())
 except ImportError:
     pass
 cv2.setNumThreads(4)
@@ -1336,7 +1337,9 @@ class LiveStreamManager(threading.Thread):
     def __init__(self, engine: 'VisionEngine'):
         super().__init__(daemon=True, name="LiveStreamMgr")
         self._engine          = engine
-        self._session_id      = f"fs_{uuid.uuid4().hex[:12]}"
+        # Use the web's session_id if already known; fallback to timestamp-based ID
+        # (never generate a uuid4 locally — the web is the source of truth)
+        self._session_id      = FAPI._session_id or f"fs_{int(time.time())}"
         self._last_push_t     = 0.0
         self._seen_rnd_winners: dict = {}
         self._stop_ev         = threading.Event()
@@ -1878,6 +1881,13 @@ class VisionEngine(threading.Thread):
         self.cam_a_idx = cam_a_idx
         self.cam_b_idx = cam_b_idx
         self.cam_c_idx = cam_c_idx
+        # Explicit camera map — logged on startup to diagnose camera assignment bugs
+        self.camera_map = {
+            "A": cam_a_idx,
+            "B": cam_b_idx,
+            "C": cam_c_idx,
+        }
+        print(f"[CAM MAP] {self.camera_map}")
         self.stereo_ab = StereoFuser(baseline_m=baseline_m)
         self.stereo_ac = StereoFuser(baseline_m=baseline_m*1.2)
         self.roles = RoleDetector()
@@ -2238,19 +2248,24 @@ class VisionEngine(threading.Thread):
         self.red.reset(); self.blue.reset()
         self.rnd_stats={}; self.rnd_winners={}; self._reset_ts()
         if DATASET_ENABLED: DATASET.start_session()
-        # If FAPI already has an official session prepared (from OfficialSessionDialog),
-        # reuse its fight_id and fighter names — do NOT overwrite with a random UUID
-        if FAPI._fight_id and FAPI._session_id:
+        # The WEB is the owner of fight_id — the motor never invents one locally.
+        # If no official session is ready, try to fetch the active fight from the web.
+        if not (FAPI._fight_id and FAPI._session_id):
+            self._log("Sin sesión oficial — buscando sesión activa en la web…")
+            FAPI.fetch_active_session()
+
+        if FAPI._fight_id:
             _fight_uuid = FAPI._fight_id
-            red_name    = FAPI._fighter_red_name
-            blue_name   = FAPI._fighter_blue_name
-            self._log(f"=== SESIÓN OFICIAL: {red_name} vs {blue_name} ===")
+            red_name    = FAPI._fighter_red_name or "Esquina Roja"
+            blue_name   = FAPI._fighter_blue_name or "Esquina Azul"
+            self._log(f"=== SESIÓN: {red_name} vs {blue_name} ===")
         else:
-            import uuid as _uuid
-            _fight_uuid = str(_uuid.uuid4())
-            red_name    = "Esquina Roja"
-            blue_name   = "Esquina Azul"
-            self._log("=== SESIÓN INICIADA ===")
+            # No fight_id from web — refuse to start to avoid FK / desync errors
+            self._log("❌ INICIO BLOQUEADO: la web no tiene sesión activa. "
+                      "Crea la pelea en fighter-id.org primero.")
+            self.session_state = "IDLE"
+            return False
+
         FAPI.start_session(
             fight_id       = _fight_uuid,
             fighter_a_name = red_name,
