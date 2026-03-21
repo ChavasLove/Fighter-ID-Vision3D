@@ -43,6 +43,10 @@ from collections import deque
 
 import requests
 
+# Config — lee de .env via fighterid_vision_engine.config.settings
+# Esto reemplaza el antiguo "import main as m" que acoplaba el bridge al GUI.
+from fighterid_vision_engine.config import settings as _cfg
+
 # ---------------------------------------------------------------------------
 # Optional supabase-py client (pip install supabase)
 # If not installed the bridge falls back to edge-function HTTP calls.
@@ -127,10 +131,9 @@ class FighterIDAPI:
         if not _SUPABASE_SDK:
             return None
         try:
-            import main as m
-            if not m.SUPABASE_URL or not m.SUPABASE_ANON_KEY:
+            if not _cfg.SUPABASE_URL or not _cfg.SUPABASE_ANON_KEY:
                 return None
-            self._db = _supa_create(m.SUPABASE_URL, m.SUPABASE_ANON_KEY)
+            self._db = _supa_create(_cfg.SUPABASE_URL, _cfg.SUPABASE_ANON_KEY)
         except Exception as e:
             print(f"[FighterIDAPI] supabase client init error: {e}")
         return self._db
@@ -187,12 +190,11 @@ class FighterIDAPI:
 
     def _fetch_active_session_http(self):
         """HTTP fallback when supabase-py is unavailable."""
-        import main as m
-        if not m.API_ENABLED or not m.FIGHTERID_API_KEY:
+        if not _cfg.API_ENABLED or not _cfg.FIGHTERID_API_KEY:
             return None
         try:
             r = requests.get(
-                f"{m.FIGHTERID_EDGE_URL}/vision/get-active-session",
+                f"{_cfg.FIGHTERID_EDGE_URL}/vision/get-active-session",
                 headers=self._headers(),
                 timeout=5,
             )
@@ -478,7 +480,6 @@ class FighterIDAPI:
             print("[FighterIDAPI] send_event: sin fight_id activo — evento descartado")
             return
         try:
-            import main as m
             requests.post(
                 f"{self._base_url()}/event",
                 json={
@@ -576,24 +577,20 @@ class FighterIDAPI:
     # ------------------------------------------------------------------
 
     def _headers(self):
-        import main as m
         return {
-            "Authorization": f"Bearer {m.FIGHTERID_API_KEY}",
+            "Authorization": f"Bearer {_cfg.FIGHTERID_API_KEY}",
             "Content-Type":  "application/json",
-            "apikey":         m.FIGHTERID_API_KEY,
+            "apikey":         _cfg.FIGHTERID_API_KEY,
         }
 
     def _base_url(self):
-        import main as m
-        return m.FIGHTERID_API_URL            # .../functions/v1/ai-strike-ingest
+        return _cfg.FIGHTERID_API_URL         # .../functions/v1/ai-strike-ingest
 
     def _vsync_url(self):
-        import main as m
-        return f"{m.FIGHTERID_EDGE_URL}/vision-start-session"  # .../functions/v1/vision-start-session
+        return f"{_cfg.FIGHTERID_EDGE_URL}/vision-start-session"  # .../functions/v1/vision-start-session
 
     def _post(self, path, body, timeout=5):
-        import main as m
-        if not m.API_ENABLED or not m.FIGHTERID_API_KEY:
+        if not _cfg.API_ENABLED or not _cfg.FIGHTERID_API_KEY:
             return False, {}
         try:
             r = requests.post(
@@ -616,8 +613,7 @@ class FighterIDAPI:
 
     def _post_vsync(self, subpath, body, timeout=5):
         """POST a vision-start-session/<subpath>. subpath='' para la raíz."""
-        import main as m
-        if not m.API_ENABLED or not m.FIGHTERID_API_KEY:
+        if not _cfg.API_ENABLED or not _cfg.FIGHTERID_API_KEY:
             return False, {}
         url = self._vsync_url() + (f"/{subpath}" if subpath else "")
         try:
