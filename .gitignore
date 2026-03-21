@@ -14,5 +14,9 @@ session_report_*.json
 fight_report_*.json
 report_*.json
 
+# Env — credenciales locales (nunca versionar)
+.env
+
 # Models
 *.pt
+*.onnx
