@@ -3,10 +3,11 @@
 
 # Computer vision
 opencv-python>=4.8.0
-ultralytics>=8.0.0          # YOLOv8
+ultralytics>=8.0.0          # YOLOv8 pose detection
 
-# GPU inference — AMD DirectML (vision_motor_v1.py)
+# GPU inference — AMD DirectML
 onnxruntime-directml>=1.16.0   # ONNX + DirectML para AMD GPU
+# Para NVIDIA CUDA: pip install onnxruntime-gpu (reemplaza onnxruntime-directml)
 
 # Supabase
 supabase>=2.0.0             # Python client (supabase-py)
@@ -16,3 +17,15 @@ requests>=2.31.0
 
 # Utilities
 numpy>=1.24.0
+scipy>=1.10.0               # Hungarian algorithm (multi-camera matching en main_gui.py)
+
+# Config — carga .env
+python-dotenv>=1.0.0
+
+# GUI (solo requerido para main_gui.py — NO para main.py headless)
+# customtkinter>=5.2.0
+# pillow>=10.0.0
+
+# GPU AMD (opcional — solo si se usa torch directamente)
+# torch-directml>=0.2.0
+
