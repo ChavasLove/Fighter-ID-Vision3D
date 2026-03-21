@@ -43,6 +43,7 @@ class FighterIDAPI:
         self.fight_id   = None   # viene de /start
         self.red        = None   # UUID rojo — viene de /start
         self.blue       = None   # UUID azul — viene de /start
+        self._hb_running = False  # arranca en start_session(), para en stop_heartbeat()
         # Diagnóstico al arrancar — permite detectar URLs mal configuradas antes
         # de intentar conectar y recibir 'Invalid URL' o errores crípticos.
         print(f"[CONFIG] API_URL     = {self.base_url}")
@@ -88,6 +89,36 @@ class FighterIDAPI:
 
         print(f"[SYNC OK] fight={self.fight_id}  session={self.session_id}")
         print(f"[FIGHTERS] red={self.red}  blue={self.blue}")
+
+        # Arrancar heartbeat — POST /heartbeat cada 3s mientras la sesión está activa
+        self._hb_running = True
+        threading.Thread(
+            target=self._heartbeat_loop,
+            daemon=True,
+            name="FighterIDHeartbeat",
+        ).start()
+        print("[HEARTBEAT] loop iniciado")
+
+    def _heartbeat_loop(self) -> None:
+        """POST /heartbeat cada 3s — mantiene last_heartbeat actualizado en la web."""
+        while self._hb_running:
+            try:
+                requests.post(
+                    f"{self.base_url}/heartbeat",
+                    json={
+                        "fight_id":  self.fight_id,
+                        "device_id": DEVICE_ID,
+                    },
+                    headers=self._headers(),
+                    timeout=3,
+                )
+            except Exception as e:
+                print(f"[HEARTBEAT] Error: {e}")
+            time.sleep(3)
+
+    def stop_heartbeat(self) -> None:
+        """Detiene el loop de heartbeat — llamado desde VisionMotorV1.stop()."""
+        self._hb_running = False
 
     def send_event(self, fighter_id: str, confidence: float) -> None:
         """POST /event — fire-and-forget en hilo daemon."""
@@ -213,6 +244,7 @@ class VisionMotorV1:
                 fps_t0           = time.time()
 
     def stop(self) -> None:
+        self.api.stop_heartbeat()
         self._running = False
         if self.recorder:
             self.recorder.stop()
