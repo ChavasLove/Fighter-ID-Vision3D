@@ -172,8 +172,9 @@ class VisionMotorV1:
         self._loop()
 
     def _loop(self) -> None:
-        fps_frames = 0
-        fps_t0     = time.time()
+        fps_frames       = 0
+        fps_personas_sum = 0   # acumula detecciones por frame para calcular promedio
+        fps_t0           = time.time()
 
         while self._running:
             frame, ts = self._streams["A"].read()
@@ -198,12 +199,18 @@ class VisionMotorV1:
                           f"  speed={speed:.2f}m/s  conf={conf:.2f}")
                     self.api.send_event(fighter_id, conf)
 
-            fps_frames += 1
+            fps_frames       += 1
+            fps_personas_sum += len(persons)
             if time.time() - fps_t0 >= 5.0:
-                fps = fps_frames / (time.time() - fps_t0)
-                print(f"[FPS] {fps:.1f}  personas={len(persons)}")
-                fps_frames = 0
-                fps_t0     = time.time()
+                elapsed  = time.time() - fps_t0
+                fps      = fps_frames / elapsed
+                avg_p    = fps_personas_sum / fps_frames
+                # personas_avg: promedio de cuerpos detectados por frame en los últimos 5s
+                # personas_now: conteo del frame actual (puede ser 0 entre detecciones)
+                print(f"[FPS] {fps:.1f}  personas_avg={avg_p:.1f}  personas_now={len(persons)}")
+                fps_frames       = 0
+                fps_personas_sum = 0
+                fps_t0           = time.time()
 
     def stop(self) -> None:
         self._running = False

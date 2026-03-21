@@ -1,7 +1,16 @@
 """
 FighterID Vision Engine — PoseDetector
 Detección YOLOv8-pose con ONNX + DirectML como backend principal.
-Fallback automático a ultralytics si onnxruntime no está instalado.
+
+Cadena de fallback:
+  1. GPU ONNX   (DmlExecutionProvider o CUDAExecutionProvider)
+  2. CPU ONNX   (CPUExecutionProvider — más rápido que ultralytics CPU)
+  3. ultralytics (último recurso — carga PyTorch completo)
+
+Variables de entorno que controlan el comportamiento:
+  FORCE_CPU=true   → salta GPU y usa CPUExecutionProvider directamente
+  POSE_CONF_THR    → umbral de confianza mínima (default 0.35)
+
 Extraído de vision_motor_v1.py.
 """
 
@@ -10,25 +19,32 @@ import os
 import cv2
 import numpy as np
 
-# ── GPU detection (heredado del entorno raíz) ──────────────────────────
+# FORCE_CPU=true: saltar DML/CUDA y usar CPU directamente
+# Útil cuando DML falla con "acceso denegado" sin reinstalar drivers.
+_FORCE_CPU = os.getenv("FORCE_CPU", "false").strip().lower() == "true"
+
+# ── GPU detection ──────────────────────────────────────────────────────
 _DEVICE  = "cpu"
 _DML_DEV = None
 
-try:
-    import torch_directml
-    _DML_DEV = torch_directml.device()
-    _DEVICE  = "dml"
-    print("[GPU] torch-directml → AMD GPU")
-except ImportError:
+if not _FORCE_CPU:
     try:
-        import torch
-        if torch.cuda.is_available():
-            _DEVICE = "cuda"
-            print(f"[GPU] CUDA: {torch.cuda.get_device_name(0)}")
-        else:
-            print("[GPU] Sin GPU acelerada — usando CPU")
+        import torch_directml
+        _DML_DEV = torch_directml.device()
+        _DEVICE  = "dml"
+        print("[GPU] torch-directml → AMD GPU")
     except ImportError:
-        print("[GPU] torch no disponible — usando CPU")
+        try:
+            import torch
+            if torch.cuda.is_available():
+                _DEVICE = "cuda"
+                print(f"[GPU] CUDA: {torch.cuda.get_device_name(0)}")
+            else:
+                print("[GPU] Sin GPU acelerada — usando CPU")
+        except ImportError:
+            print("[GPU] torch no disponible — usando CPU")
+else:
+    print("[GPU] FORCE_CPU=true — usando CPU directamente (DML desactivado)")
 
 # Rutas de modelo: busca primero en la carpeta models/ del paquete,
 # luego en el directorio de trabajo (raíz del repo) como fallback.
@@ -50,15 +66,15 @@ def _find_model(filename: str) -> str:
 class PoseDetector:
     """
     Detección de pose YOLOv8-pose.
-    Prioridad: onnxruntime-directml → ultralytics (con DirectML/CUDA).
-    Si yolov8n-pose.onnx no existe, lo exporta automáticamente desde el .pt.
+    Cadena: GPU ONNX → CPU ONNX → ultralytics (ver docstring del módulo).
     """
 
     ONNX_FILENAME = "yolov8n-pose.onnx"
     PT_FILENAME   = "yolov8n-pose.pt"
-    CONF_THR      = 0.45
 
     def __init__(self):
+        from fighterid_vision_engine.config.settings import POSE_CONF_THR
+        self.CONF_THR     = POSE_CONF_THR
         self._ort_session = None
         self._yolo        = None
         self._input_name  = None
@@ -68,25 +84,46 @@ class PoseDetector:
         onnx_path = _find_model(self.ONNX_FILENAME)
         pt_path   = _find_model(self.PT_FILENAME)
 
-        # ── Intento 1: onnxruntime-directml ──────────────────────────
         try:
             import onnxruntime as ort
+
+            # Asegurar que existe el archivo ONNX (exportar si no)
             if not os.path.exists(onnx_path):
                 self._export_onnx(pt_path, onnx_path)
-            providers = (["DmlExecutionProvider"]
-                         if _DEVICE in ("dml", "cuda")
-                         else ["CPUExecutionProvider"])
-            self._ort_session = ort.InferenceSession(onnx_path, providers=providers)
-            self._input_name  = self._ort_session.get_inputs()[0].name
-            print(f"[ONNX] Cargado — providers={providers}")
+
+            # ── Intento 1: GPU (DML o CUDA) — solo si no se forzó CPU ────
+            if _DEVICE in ("dml", "cuda") and not _FORCE_CPU:
+                gpu_provider = ("DmlExecutionProvider"
+                                if _DEVICE == "dml"
+                                else "CUDAExecutionProvider")
+                try:
+                    self._ort_session = ort.InferenceSession(
+                        onnx_path, providers=[gpu_provider]
+                    )
+                    self._input_name = self._ort_session.get_inputs()[0].name
+                    print(f"[ONNX] Cargado — provider={gpu_provider}")
+                    return
+                except Exception as e:
+                    # "Acceso denegado" en Windows con DML → caer a CPU ONNX
+                    print(f"[ONNX] {gpu_provider} falló: {e}")
+                    print("[ONNX] Intentando CPUExecutionProvider…")
+                    print("[ONNX] TIP: usa FORCE_CPU=true en .env para saltar este intento")
+
+            # ── Intento 2: CPU ONNX (más rápido que ultralytics CPU) ──────
+            self._ort_session = ort.InferenceSession(
+                onnx_path, providers=["CPUExecutionProvider"]
+            )
+            self._input_name = self._ort_session.get_inputs()[0].name
+            print("[ONNX] Cargado — provider=CPUExecutionProvider")
             return
+
         except ImportError:
             print("[ONNX] onnxruntime no instalado — "
                   "instala: pip install onnxruntime-directml")
         except Exception as e:
-            print(f"[ONNX] Error al cargar: {e}")
+            print(f"[ONNX] Error: {e}")
 
-        # ── Fallback: ultralytics ─────────────────────────────────────
+        # ── Intento 3: ultralytics (último recurso) ────────────────────
         self._init_ultralytics(pt_path)
 
     def _export_onnx(self, pt_path: str, onnx_path: str) -> None:
