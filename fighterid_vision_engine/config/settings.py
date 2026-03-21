@@ -28,12 +28,31 @@ SUPABASE_ANON_KEY = os.getenv(
     ),
 )
 
+# ── URL validation helper ──────────────────────────────────────────────
+def _require_url(env_key: str, fallback: str) -> str:
+    """
+    Lee env_key del entorno. Si el valor no empieza con 'http' (p.ej. se puso
+    una API key por error), imprime un aviso claro y usa el fallback calculado.
+    Esto evita el error 'Invalid URL sb_publishable_...' al arrancar el motor.
+    """
+    val = os.getenv(env_key, "").strip()
+    if val.startswith("http"):
+        return val
+    if val:
+        print(
+            f"[CONFIG] ⚠  {env_key}={val!r} no es una URL válida "
+            f"(¿pusiste la API key en lugar de la URL?).\n"
+            f"         Usando valor por defecto: {fallback}"
+        )
+    return fallback
+
+
 # ── Edge Functions ─────────────────────────────────────────────────────
-FIGHTERID_EDGE_URL = os.getenv(
+FIGHTERID_EDGE_URL = _require_url(
     "FIGHTERID_EDGE_URL",
     f"{SUPABASE_URL}/functions/v1",
 )
-FIGHTERID_API_URL  = os.getenv(
+FIGHTERID_API_URL  = _require_url(
     "FIGHTERID_API_URL",
     f"{SUPABASE_URL}/functions/v1/ai-strike-ingest",
 )

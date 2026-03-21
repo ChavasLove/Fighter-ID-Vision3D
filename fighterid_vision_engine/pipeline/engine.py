@@ -43,6 +43,10 @@ class FighterIDAPI:
         self.fight_id   = None   # viene de /start
         self.red        = None   # UUID rojo — viene de /start
         self.blue       = None   # UUID azul — viene de /start
+        # Diagnóstico al arrancar — permite detectar URLs mal configuradas antes
+        # de intentar conectar y recibir 'Invalid URL' o errores crípticos.
+        print(f"[CONFIG] API_URL     = {self.base_url}")
+        print(f"[CONFIG] API_ENABLED = {API_ENABLED}")
 
     def _headers(self) -> dict:
         return {
