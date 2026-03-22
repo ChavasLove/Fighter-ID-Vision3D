@@ -140,12 +140,13 @@ class FighterIDAPI:
 
     def _post_event(self, payload: dict) -> None:
         try:
-            requests.post(
+            r = requests.post(
                 f"{self.base_url}/event",
                 json=payload,
                 headers=self._headers(),
                 timeout=5,
             )
+            print(f"[EVENT] OK → status={r.status_code}  fighter={payload.get('fighter_id')}")
         except Exception as e:
             print(f"[EVENT] Error enviando: {e}")
 

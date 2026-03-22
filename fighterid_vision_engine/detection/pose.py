@@ -34,15 +34,29 @@ if not _FORCE_CPU:
         _DEVICE  = "dml"
         print("[GPU] torch-directml → AMD GPU")
     except ImportError:
+        # torch_directml no disponible — verificar directamente vía onnxruntime
+        # onnxruntime-directml expone DmlExecutionProvider sin necesitar torch
         try:
-            import torch
-            if torch.cuda.is_available():
+            import onnxruntime as _ort_check
+            _avail = _ort_check.get_available_providers()
+            if "DmlExecutionProvider" in _avail:
+                _DEVICE = "dml"
+                print("[GPU] DmlExecutionProvider disponible via onnxruntime → AMD GPU")
+            elif "CUDAExecutionProvider" in _avail:
                 _DEVICE = "cuda"
-                print(f"[GPU] CUDA: {torch.cuda.get_device_name(0)}")
+                print("[GPU] CUDAExecutionProvider disponible via onnxruntime → NVIDIA GPU")
             else:
-                print("[GPU] Sin GPU acelerada — usando CPU")
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        _DEVICE = "cuda"
+                        print(f"[GPU] CUDA: {torch.cuda.get_device_name(0)}")
+                    else:
+                        print("[GPU] Sin GPU acelerada — usando CPU")
+                except ImportError:
+                    print("[GPU] torch no disponible — usando CPU")
         except ImportError:
-            print("[GPU] torch no disponible — usando CPU")
+            print("[GPU] Sin GPU acelerada — usando CPU")
 else:
     print("[GPU] FORCE_CPU=true — usando CPU directamente (DML desactivado)")
 
@@ -175,6 +189,7 @@ class PoseDetector:
         if data.ndim == 2 and data.shape[0] == 56:
             data = data.T  # → [N, 56]
 
+        raw_count = len(data)
         persons = []
         for det in data:
             conf = float(det[4])
@@ -186,6 +201,12 @@ class PoseDetector:
             kps_raw[:, 0] *= sx
             kps_raw[:, 1] *= sy
             persons.append({"keypoints": kps_raw, "bbox": [x1, y1, x2, y2], "conf": conf})
+
+        if not persons and raw_count > 0:
+            max_conf = max(float(d[4]) for d in data)
+            print(f"[ONNX] {raw_count} candidatos descartados "
+                  f"(conf_max={max_conf:.3f} < thr={self.CONF_THR}) "
+                  f"— prueba bajar POSE_CONF_THR en .env")
         return persons
 
     def _infer_yolo(self, frame: np.ndarray) -> list:

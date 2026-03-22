@@ -82,7 +82,7 @@ PIX_PER_M = float(os.getenv("PIX_PER_M", "200.0"))
 # Umbral de confianza para detección de pose (0.0–1.0)
 # 0.35 por defecto: más permisivo que el 0.45 original.
 # Subir a 0.50 si hay demasiados falsos positivos en el ring.
-POSE_CONF_THR = float(os.getenv("POSE_CONF_THR", "0.35"))
+POSE_CONF_THR = float(os.getenv("POSE_CONF_THR", "0.25"))
 
 # ── COCO keypoint indices ──────────────────────────────────────────────
 KP_NOSE    = 0
