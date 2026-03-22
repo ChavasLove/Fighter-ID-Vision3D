@@ -52,6 +52,12 @@ def main() -> None:
         "--cam-c", type=int, default=2,
         help="Índice OpenCV cámara C — cenital overhead (default: 2)",
     )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        default=False,
+        help="Mostrar ventana de video en tiempo real con detecciones superpuestas. ESC para cerrar.",
+    )
     args = parser.parse_args()
 
     fight_id = args.fight_id or os.environ.get("FIGHT_ID")
@@ -69,6 +75,7 @@ def main() -> None:
         cam_a=args.cam_a,
         cam_b=args.cam_b,
         cam_c=args.cam_c,
+        show=args.show,
     )
 
     try:

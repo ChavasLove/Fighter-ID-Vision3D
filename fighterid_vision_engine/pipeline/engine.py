@@ -13,6 +13,8 @@ Extraído y modularizado desde vision_motor_v1.py.
 import threading
 import time
 
+import cv2
+import numpy as np
 import requests
 
 from fighterid_vision_engine.camera.capture import CameraStream
@@ -171,11 +173,13 @@ class VisionMotorV1:
     """
 
     def __init__(self, fight_id: str,
-                 cam_a: int = 0, cam_b: int = 1, cam_c: int = 2):
+                 cam_a: int = 0, cam_b: int = 1, cam_c: int = 2,
+                 show: bool = False):
         self.camera_map = {"A": cam_a, "B": cam_b, "C": cam_c}
         print(f"[CAM MAP] {self.camera_map}")
 
         self._fight_id = fight_id
+        self._show     = show
         self.api       = FighterIDAPI()
         self.detector  = PoseDetector()
         self.tracker   = SimpleTracker()
@@ -231,6 +235,12 @@ class VisionMotorV1:
                           f"  speed={speed:.2f}m/s  conf={conf:.2f}")
                     self.api.send_event(fighter_id, conf)
 
+            if self._show:
+                display = self._annotate(frame, roles, len(persons))
+                cv2.imshow("FighterID Vision", display)
+                if cv2.waitKey(1) & 0xFF == 27:   # ESC para salir
+                    self._running = False
+
             fps_frames       += 1
             fps_personas_sum += len(persons)
             if time.time() - fps_t0 >= 5.0:
@@ -244,9 +254,28 @@ class VisionMotorV1:
                 fps_personas_sum = 0
                 fps_t0           = time.time()
 
+    def _annotate(self, frame: np.ndarray, roles: dict,
+                  n_persons: int) -> np.ndarray:
+        """Dibuja bboxes de esquinas y stats sobre el frame. No modifica el original."""
+        disp   = frame.copy()
+        COLORS = {"red": (0, 0, 255), "blue": (255, 0, 0)}
+        for corner, person in roles.items():
+            if person is None:
+                continue
+            x1, y1, x2, y2 = [int(v) for v in person["bbox"]]
+            color = COLORS.get(corner, (0, 255, 0))
+            cv2.rectangle(disp, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(disp, corner.upper(), (x1, max(y1 - 8, 0)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        cv2.putText(disp, f"personas={n_persons}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        return disp
+
     def stop(self) -> None:
         self.api.stop_heartbeat()
         self._running = False
+        if self._show:
+            cv2.destroyAllWindows()
         if self.recorder:
             self.recorder.stop()
         for role, stream in self._streams.items():
