@@ -89,10 +89,13 @@ class FighterIDAPI:
         self._round_num     = 1
 
         # Fighter state (loaded from fighter_profiles)
-        self._fighter_red_id   = None
-        self._fighter_blue_id  = None
-        self._fighter_red_name  = "Rojo"
-        self._fighter_blue_name = "Azul"
+        self._fighter_red_id      = None
+        self._fighter_blue_id     = None
+        self._fighter_red_name    = "Rojo"
+        self._fighter_blue_name   = "Azul"
+        # Extended profiles — populated by fetch_fight_context() or _load_fighters()
+        self._fighter_red_profile  = {}   # {nickname, record, weight_class, gym}
+        self._fighter_blue_profile = {}
 
         self._thread    = threading.Thread(target=self._worker,
                           daemon=True, name="FighterIDAPI")
@@ -109,6 +112,20 @@ class FighterIDAPI:
 
         # Realtime subscription — re-sync if web changes the active fight_id
         self.listen_fight_changes()
+
+    # ------------------------------------------------------------------
+    # Name resolution helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_name(row: dict, fallback: str = "Sin nombre") -> str:
+        """
+        Resolves a fighter display name from a fighter_profiles row.
+        Tries: full_name → name → fallback.
+        Handles both DB column conventions (full_name vs name).
+        """
+        val = row.get("full_name") or row.get("name") or fallback
+        return val.strip() if isinstance(val, str) and val.strip() else fallback
 
     # ------------------------------------------------------------------
     # Properties
@@ -230,14 +247,16 @@ class FighterIDAPI:
             return
         try:
             res = (db.table("fighter_profiles")
-                     .select("id,name")
+                     .select("id, name, full_name, nickname, record, weight_class, gym_id")
                      .in_("id", ids)
                      .execute())
             for f in res.data:
                 if f["id"] == session_row.get("fighter_red_id"):
-                    self._fighter_red_name = f.get("name", "Rojo")
+                    self._fighter_red_name    = self._resolve_name(f, "Rojo")
+                    self._fighter_red_profile = f
                 elif f["id"] == session_row.get("fighter_blue_id"):
-                    self._fighter_blue_name = f.get("name", "Azul")
+                    self._fighter_blue_name    = self._resolve_name(f, "Azul")
+                    self._fighter_blue_profile = f
             print(f"[FighterIDAPI] fighters → "
                   f"red={self._fighter_red_name}  blue={self._fighter_blue_name}")
         except Exception as e:
@@ -261,7 +280,7 @@ class FighterIDAPI:
         try:
             res = (db.table("fighter_profiles")
                      .select("*")
-                     .order("name")
+                     .order("full_name", desc=False)
                      .execute())
             return res.data or []
         except Exception as e:
@@ -269,6 +288,96 @@ class FighterIDAPI:
                 self._reset_db()
             print(f"[FighterIDAPI] list_fighter_profiles error: {e}")
             return []
+
+    def fetch_fight_context(self, fight_id: str) -> dict | None:
+        """
+        Retorna contexto completo del combate:
+          {"fighter_red": {id, name, nickname, record, weight_class, gym},
+           "fighter_blue": {...}}
+
+        Intento 1: view fight_full_context (requiere migración SQL aplicada).
+        Intento 2: join directo fights ↔ fighter_profiles (funciona sin migración).
+        Si ambos fallan: retorna None sin lanzar excepción.
+
+        Actualiza _fighter_red/blue_name y _fighter_red/blue_profile como efecto colateral.
+        """
+        db = self._get_db()
+        if not db or not fight_id:
+            return None
+
+        def _build_result(red: dict, blue: dict) -> dict:
+            r_name = self._resolve_name(red, "Rojo")
+            b_name = self._resolve_name(blue, "Azul")
+            with self._state_lock:
+                self._fighter_red_name     = r_name
+                self._fighter_blue_name    = b_name
+                self._fighter_red_id       = red.get("id")  or self._fighter_red_id
+                self._fighter_blue_id      = blue.get("id") or self._fighter_blue_id
+                self._fighter_red_profile  = red
+                self._fighter_blue_profile = blue
+            print(f"[FighterIDAPI] fight_context → red={r_name}  blue={b_name}")
+            return {
+                "fighter_red":  {
+                    "id":           red.get("id")           or red.get("fighter_red_id"),
+                    "name":         r_name,
+                    "nickname":     red.get("nickname")     or red.get("fighter_red_nickname"),
+                    "record":       red.get("record")       or red.get("fighter_red_record"),
+                    "weight_class": red.get("weight_class") or red.get("fighter_red_weight"),
+                    "gym":          red.get("gym")          or red.get("fighter_red_gym"),
+                },
+                "fighter_blue": {
+                    "id":           blue.get("id")           or blue.get("fighter_blue_id"),
+                    "name":         b_name,
+                    "nickname":     blue.get("nickname")     or blue.get("fighter_blue_nickname"),
+                    "record":       blue.get("record")       or blue.get("fighter_blue_record"),
+                    "weight_class": blue.get("weight_class") or blue.get("fighter_blue_weight"),
+                    "gym":          blue.get("gym")          or blue.get("fighter_blue_gym"),
+                },
+            }
+
+        # ── Intento 1: fight_full_context view ────────────────────────
+        try:
+            res = (db.table("fight_full_context")
+                     .select("*")
+                     .eq("fight_id", fight_id)
+                     .limit(1)
+                     .execute())
+            if res.data:
+                row = res.data[0]
+                # La view expone columnas planas — convertir a sub-dicts
+                red  = {k.replace("fighter_red_",  ""): v
+                        for k, v in row.items() if k.startswith("fighter_red_")}
+                blue = {k.replace("fighter_blue_", ""): v
+                        for k, v in row.items() if k.startswith("fighter_blue_")}
+                red["id"]  = row.get("fighter_red_id")
+                blue["id"] = row.get("fighter_blue_id")
+                return _build_result(red, blue)
+        except Exception as e:
+            if self._is_disconnect(e):
+                self._reset_db()
+            # View no existe aún — continuar con fallback
+        # ── Intento 2: join directo (sin migración) ───────────────────
+        try:
+            res = (db.table("fights")
+                     .select("id, status, "
+                             "fighter_red:fighter_profiles!fighter_red_id"
+                             "(id, name, full_name, nickname, record, weight_class, gym_id), "
+                             "fighter_blue:fighter_profiles!fighter_blue_id"
+                             "(id, name, full_name, nickname, record, weight_class, gym_id)")
+                     .eq("id", fight_id)
+                     .limit(1)
+                     .execute())
+            if res.data:
+                row  = res.data[0]
+                red  = row.get("fighter_red")  or {}
+                blue = row.get("fighter_blue") or {}
+                return _build_result(red, blue)
+        except Exception as e:
+            if self._is_disconnect(e):
+                self._reset_db()
+            print(f"[FighterIDAPI] fetch_fight_context fallback error: {e}")
+
+        return None
 
     def create_fight_session(self, red_id, blue_id, total_rounds=3,
                              model_version="v4.3"):
@@ -408,14 +517,22 @@ class FighterIDAPI:
         # 1) Fetch active session from DB (también actualiza self._fight_id si la DB tiene uno)
         session_row = self.fetch_active_session()
 
-        # 2) Load real fighter names (overrides caller-supplied defaults)
-        if session_row:
-            self._load_fighters(session_row)
+        # 2) Load full fighter context — intenta view unificada, fallback a join
+        effective_fight_id = self._fight_id or fight_id
+        if effective_fight_id:
+            ctx = self.fetch_fight_context(effective_fight_id)
         else:
-            self._fighter_red_name  = fighter_a_name
-            self._fighter_blue_name = fighter_b_name
+            ctx = None
 
-        # 3) Crear sync session en vision_sync_sessions
+        # 3) Si no hubo contexto completo, cargar nombres básicos desde session
+        if not ctx:
+            if session_row:
+                self._load_fighters(session_row)
+            else:
+                self._fighter_red_name  = fighter_a_name
+                self._fighter_blue_name = fighter_b_name
+
+        # 4) Crear sync session en vision_sync_sessions
         self._create_vision_sync_session()
 
         # 4) Registrar motor como conectado en la sesión activa
