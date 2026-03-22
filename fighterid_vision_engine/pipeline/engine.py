@@ -28,7 +28,9 @@ from fighterid_vision_engine.config.settings import (
     FIGHTERID_API_KEY,
     DEVICE_ID,
     API_ENABLED,
+    STATS_INTERVAL_S,
 )
+from fighterid_vision_engine.pipeline import fighters_state as _fs
 
 
 def discover_fight_id() -> "str | None":
@@ -204,6 +206,27 @@ class FighterIDAPI:
         except Exception as e:
             print(f"[EVENT] Error enviando: {e}")
 
+    def post_stats(self, payload: dict) -> None:
+        """POST /stats — fire-and-forget daemon. Envía métricas al dashboard."""
+        if not self.fight_id or not API_ENABLED:
+            return
+        threading.Thread(
+            target=self._post_stats_payload,
+            args=(payload,),
+            daemon=True,
+        ).start()
+
+    def _post_stats_payload(self, payload: dict) -> None:
+        try:
+            requests.post(
+                f"{self.base_url}/stats",
+                json=payload,
+                headers=self._headers(),
+                timeout=5,
+            )
+        except Exception as e:
+            print(f"[STATS] Error enviando: {e}")
+
     def resolve_fighter(self, track_id: str):
         """Mapea 'red'/'blue' → UUID de la DB. Los IDs vienen de la web."""
         return self.red if track_id == "red" else self.blue
@@ -250,8 +273,15 @@ class VisionMotorV1:
             name="FighterIDSessionSync",
         ).start()
 
-        # 3. Arrancar bucle principal
+        # 3. Hilo de push de métricas al dashboard
         self._running = True
+        threading.Thread(
+            target=self._stats_push_loop,
+            daemon=True,
+            name="FighterIDStatsPush",
+        ).start()
+
+        # 4. Arrancar bucle principal
         print("[MOTOR] Bucle de detección iniciado — Ctrl+C para detener")
         self._loop()
 
@@ -277,6 +307,7 @@ class VisionMotorV1:
             print(f"[SYNC] Conectando sesión → fight_id={self._fight_id}")
             try:
                 self.api.start_session(self._fight_id)
+                _fs.reset(time.time())
                 if self.recorder is None:
                     self.recorder = VideoRecorder(self.api.fight_id, round_num=1)
             except Exception as e:
@@ -290,6 +321,7 @@ class VisionMotorV1:
                     self._fight_id = fight_id
                     try:
                         self.api.start_session(fight_id)
+                        _fs.reset(time.time())
                         if self.recorder is None:
                             self.recorder = VideoRecorder(self.api.fight_id, round_num=1)
                     except Exception as e:
@@ -344,9 +376,17 @@ class VisionMotorV1:
                 fps_personas_sum = 0
                 fps_t0           = time.time()
 
+    def _stats_push_loop(self) -> None:
+        """Hilo daemon: envía métricas al endpoint /stats cada STATS_INTERVAL_S."""
+        while self._running:
+            time.sleep(STATS_INTERVAL_S)
+            if self.api.fight_id:
+                payload = _fs.build_payload(self.api.fight_id)
+                self.api.post_stats(payload)
+
     def _annotate(self, frame: np.ndarray, roles: dict,
                   n_persons: int) -> np.ndarray:
-        """Dibuja bboxes de esquinas y stats sobre el frame. No modifica el original."""
+        """Dibuja bboxes, stats de luchadores y estado de sesión sobre el frame."""
         disp   = frame.copy()
         COLORS = {"red": (0, 0, 255), "blue": (255, 0, 0)}
         for corner, person in roles.items():
@@ -357,12 +397,27 @@ class VisionMotorV1:
             cv2.rectangle(disp, (x1, y1), (x2, y2), color, 2)
             cv2.putText(disp, corner.upper(), (x1, max(y1 - 8, 0)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        cv2.putText(disp, f"personas={n_persons}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+        # Overlay de métricas por luchador
+        overlay_items = [
+            ("RED",  (0, 0, 255),  40),
+            ("BLUE", (255, 0, 0), 100),
+        ]
+        for fid, color, y in overlay_items:
+            stats = _fs.compute_stats(fid)
+            f     = _fs.fighters_state[fid]
+            label = (f"{fid}: {stats['punches']} golpes | "
+                     f"{stats['avg_velocity']:.1f}m/s | "
+                     f"Lv.{_fs.get_level(f['xp'])} ({f['xp']} XP)")
+            cv2.putText(disp, label, (10, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+
         status = "CONNECTED" if self.api.fight_id else "NO SESSION"
-        color  = (0, 255, 0) if self.api.fight_id else (0, 0, 255)
-        cv2.putText(disp, status, (20, 70),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+        s_color = (0, 255, 0) if self.api.fight_id else (0, 0, 255)
+        cv2.putText(disp, status, (10, 140),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, s_color, 2)
+        cv2.putText(disp, f"personas={n_persons}", (10, 170),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
         return disp
 
     def stop(self) -> None:
