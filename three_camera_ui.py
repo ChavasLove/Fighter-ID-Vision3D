@@ -688,17 +688,34 @@ class VisionEngine(threading.Thread):
         model_c = _mk() if self.cam_c_idx is not None else None
 
         if _GPU_DEVICE is not None:
-            _dml_ok = True
             for _m in [model_a, model_b, model_c]:
                 if _m is not None:
                     try:
                         _m.overrides['device'] = _GPU_DEVICE
-                    except Exception as _e:
-                        self._log(f"[GPU] DirectML falló ({_e}) — CPU")
-                        _dml_ok = False
-                        break
-            if _dml_ok:
+                    except Exception:
+                        pass
+            # Warmup test — verify DirectML actually works before starting threads.
+            # AMD DirectML can detect OK but fail silently on first real inference.
+            _warmup_ok = False
+            try:
+                import numpy as _np
+                _blank = _np.zeros((INFER_IMGSZ, INFER_IMGSZ, 3), dtype=_np.uint8)
+                model_a(_blank, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False)
+                _warmup_ok = True
+            except Exception as _dml_e:
+                pass
+            if _warmup_ok:
                 self._log("[GPU] Modelos listos en DirectML")
+            else:
+                self._log("[GPU] DirectML falló en warmup — usando CPU para todos los modelos")
+                for _m in [model_a, model_b, model_c]:
+                    if _m is not None:
+                        try:
+                            _m.to('cpu')
+                            if hasattr(_m, 'overrides'):
+                                _m.overrides.pop('device', None)
+                        except Exception:
+                            pass
 
         inf_a  = InferThread(model_a, "InferA"); inf_a.start()
         inf_b  = InferThread(model_b, "InferB") if model_b is not None else None
