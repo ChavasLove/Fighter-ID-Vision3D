@@ -250,9 +250,14 @@ class InferThread(threading.Thread):
                 r = self.model(f, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False)
                 with self._lk: self._rout = r
             except Exception as e:
-                print(f"[{self.name}] {e}")
-                if os.getenv("DEBUG_INFER"):
-                    import traceback; traceback.print_exc()
+                print(f"[{self.name}] GPU error ({e}) — fallback CPU")
+                try:
+                    self.model.overrides['device'] = 'cpu'
+                    r = self.model(f, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False)
+                    with self._lk: self._rout = r
+                except Exception:
+                    if os.getenv("DEBUG_INFER"):
+                        import traceback; traceback.print_exc()
 
 # ══════════════════════════════════════════════════════════════════
 #  HELPERS
@@ -784,9 +789,9 @@ class VisionEngine(threading.Thread):
             for pid_a, kp_a, cf_a, gi_a in persons_a:
                 bare = gi_a.get('bare', False)
                 self.roles.update(pid_a,
-                    w_ok=gi_a.get('white', False) and bare,
-                    r_ok=gi_a.get('red',   False) and bare,
-                    b_ok=gi_a.get('blue',  False) and bare)
+                    w_ok=gi_a.get('white', False),
+                    r_ok=gi_a.get('red',   False),
+                    b_ok=gi_a.get('blue',  False))
             self.roles.try_confirm()
 
             if self.roles.mode == "test":
