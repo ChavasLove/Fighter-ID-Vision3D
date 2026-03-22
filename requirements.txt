@@ -3,6 +3,11 @@
 
 # Computer vision
 opencv-python>=4.8.0
+# ⚠  NO instalar opencv-python-headless — ultralytics lo agrega como
+#    dependencia transitoria y rompe cv2.imshow (three_camera_ui.py falla).
+#    Fix si aparece "AttributeError: module 'cv2' has no attribute 'imshow'":
+#      pip uninstall opencv-python-headless opencv-python -y
+#      pip install opencv-python>=4.8.0
 ultralytics>=8.0.0          # YOLOv8 pose detection
 
 # GPU inference — AMD DirectML
