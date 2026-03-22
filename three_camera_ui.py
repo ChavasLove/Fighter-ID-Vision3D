@@ -250,9 +250,19 @@ class InferThread(threading.Thread):
                 r = self.model(f, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False)
                 with self._lk: self._rout = r
             except Exception as e:
-                print(f"[{self.name}] {e}")
+                msg = str(e)
+                print(f"[{self.name}] {msg}")
                 if os.getenv("DEBUG_INFER"):
                     import traceback; traceback.print_exc()
+                # DirectML/ONNX falla en AMD con múltiples modelos — fallback a CPU
+                if any(k in msg.lower() for k in ("unknown error", "directml", "onnx", "device")):
+                    try:
+                        self.model.to('cpu')
+                        if hasattr(self.model, 'overrides'):
+                            self.model.overrides.pop('device', None)
+                        print(f"[{self.name}] → fallback a CPU")
+                    except Exception:
+                        pass
 
 # ══════════════════════════════════════════════════════════════════
 #  HELPERS
@@ -735,7 +745,9 @@ class VisionEngine(threading.Thread):
                     return (last[0].plot() if last and frame is not None
                             else (frame.copy() if frame is not None
                                   else np.zeros((CAM_H, CAM_W, 3), np.uint8)))
-                except:
+                except Exception as _pe:
+                    if os.getenv("DEBUG_INFER"):
+                        print(f"[plot] {_pe}")
                     return frame.copy() if frame is not None else np.zeros((CAM_H, CAM_W, 3), np.uint8)
 
             img_a = cv2.resize(safe_plot(last_a, frame_a), (CAM_W, CAM_H))

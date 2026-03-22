@@ -80,6 +80,20 @@ class FighterIDAPI:
         # Mutex para estado compartido entre threads worker / session / heartbeat
         self._state_lock = threading.Lock()
 
+        # Session state  (inicializar ANTES de arrancar cualquier hilo para
+        # evitar AttributeError en race conditions con listen_fight_changes)
+        self._db            = None          # supabase client (lazy)
+        self._session_id    = None          # fight_telemetry_sessions.id (uuid)
+        self._session_token = None          # fight_telemetry_sessions.session_token
+        self._fight_id      = None          # fight_telemetry_sessions.fight_id
+        self._round_num     = 1
+
+        # Fighter state (loaded from fighter_profiles)
+        self._fighter_red_id   = None
+        self._fighter_blue_id  = None
+        self._fighter_red_name  = "Rojo"
+        self._fighter_blue_name = "Azul"
+
         self._thread    = threading.Thread(target=self._worker,
                           daemon=True, name="FighterIDAPI")
         self._session   = threading.Thread(target=self._session_worker,
@@ -95,19 +109,6 @@ class FighterIDAPI:
 
         # Realtime subscription — re-sync if web changes the active fight_id
         self.listen_fight_changes()
-
-        # Session state  (proteger con _state_lock para writes concurrentes)
-        self._db          = None          # supabase client (lazy)
-        self._session_id  = None          # fight_telemetry_sessions.id (uuid)
-        self._session_token = None        # fight_telemetry_sessions.session_token
-        self._fight_id    = None          # fight_telemetry_sessions.fight_id
-        self._round_num   = 1
-
-        # Fighter state (loaded from fighter_profiles)
-        self._fighter_red_id   = None
-        self._fighter_blue_id  = None
-        self._fighter_red_name  = "Rojo"
-        self._fighter_blue_name = "Azul"
 
     # ------------------------------------------------------------------
     # Properties
@@ -256,17 +257,26 @@ class FighterIDAPI:
         db = self._get_db()
         if not db:
             return []
-        try:
-            res = (db.table("fighter_profiles")
-                     .select("id,name,nickname,weight_class,gym,total_fights,accuracy")
-                     .order("name")
-                     .execute())
-            return res.data or []
-        except Exception as e:
-            if self._is_disconnect(e):
-                self._reset_db()
-            print(f"[FighterIDAPI] list_fighter_profiles error: {e}")
-            return []
+        cols = "id,name,nickname,weight_class,gym,total_fights,accuracy"
+        for attempt in range(2):
+            try:
+                res = (db.table("fighter_profiles")
+                         .select(cols)
+                         .order("name")
+                         .execute())
+                return res.data or []
+            except Exception as e:
+                err_str = str(e)
+                # Si la columna 'gym' no existe en el DB (código 42703),
+                # reintentar sin ella — ejecuta supabase_migration_add_gym_column.sql
+                if attempt == 0 and '42703' in err_str and 'gym' in err_str:
+                    cols = "id,name,nickname,weight_class,total_fights,accuracy"
+                    continue
+                if self._is_disconnect(e):
+                    self._reset_db()
+                print(f"[FighterIDAPI] list_fighter_profiles error: {e}")
+                return []
+        return []
 
     def create_fight_session(self, red_id, blue_id, total_rounds=3,
                              model_version="v4.3"):
