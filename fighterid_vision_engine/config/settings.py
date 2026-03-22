@@ -84,6 +84,9 @@ PIX_PER_M = float(os.getenv("PIX_PER_M", "200.0"))
 # Subir a 0.50 si hay demasiados falsos positivos en el ring.
 POSE_CONF_THR = float(os.getenv("POSE_CONF_THR", "0.25"))
 
+# ── Intervalo de push de métricas al dashboard ─────────────────────────
+STATS_INTERVAL_S = float(os.getenv("STATS_INTERVAL_S", "1.5"))  # segundos entre cada POST /stats
+
 # ── COCO keypoint indices ──────────────────────────────────────────────
 KP_NOSE    = 0
 KP_L_WRIST = 9
