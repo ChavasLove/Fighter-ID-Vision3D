@@ -20,6 +20,23 @@ except ImportError:
     pass
 cv2.setNumThreads(3)
 
+# ── GPU detection — DirectML (Intel/AMD/NVIDIA en Windows vía DirectX 12) ──
+_GPU_DEVICE = None
+try:
+    import torch_directml as _tdml
+    _GPU_DEVICE = _tdml.device()
+    print(f"[GPU] DirectML disponible: {_tdml.device_name(0)}")
+except ImportError:
+    try:
+        import torch as _t
+        if _t.cuda.is_available():
+            _GPU_DEVICE = "cuda:0"
+            print(f"[GPU] CUDA: {_t.cuda.get_device_name(0)}")
+        else:
+            print("[GPU] Sin GPU acelerada — usando CPU")
+    except ImportError:
+        print("[GPU] Sin GPU acelerada — usando CPU")
+
 # ══════════════════════════════════════════════════════════════════
 #  VERSION  —  actualizar en cada push significativo
 # ══════════════════════════════════════════════════════════════════
@@ -221,7 +238,8 @@ class InferThread(threading.Thread):
             with self._lk: f = self._fin
             if f is None: continue
             try:
-                r = self.model(f, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False)
+                r = self.model(f, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False,
+                               device=_GPU_DEVICE)
                 with self._lk: self._rout = r
             except Exception as e:
                 print(f"[{self.name}] {e}")
