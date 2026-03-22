@@ -1157,6 +1157,19 @@ class VisionEngine(threading.Thread):
         if cap_b: cap_b.release()
         if cap_c: cap_c.release()
 
+# ── Helper para mostrar nombre de peleador en dropdowns ────────────────
+def _fighter_label(p: dict) -> str:
+    """
+    Construye la etiqueta del dropdown para un fighter_profiles row.
+    Maneja tanto 'full_name' (producción) como 'name' (legacy).
+    Ejemplo: "Juan Pérez «El Toro» [Peso Ligero]"
+    """
+    name = (p.get("full_name") or p.get("name") or "Sin nombre").strip()
+    wc   = p.get("weight_class") or "?"
+    nick = (p.get("nickname") or "").strip()
+    return f"{name}{f' «{nick}»' if nick else ''} [{wc}]"
+
+
 # ══════════════════════════════════════════════════════════════════
 #  FIGHTER SELECT DIALOG  —  selección de peleadores + sesión oficial
 # ══════════════════════════════════════════════════════════════════
@@ -1234,7 +1247,7 @@ class FighterSelectDialog(ctk.CTkToplevel):
         if not self.winfo_exists():
             return
         self._profiles = profiles
-        names = [f"{p['name']} [{p.get('weight_class', '?')}]" for p in profiles]
+        names = [_fighter_label(p) for p in profiles]
         if not names:
             self._status.configure(
                 text="Sin peleadores — verifica conexión Supabase",
