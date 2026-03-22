@@ -91,3 +91,9 @@ STATS_INTERVAL_S = float(os.getenv("STATS_INTERVAL_S", "1.5"))  # segundos entre
 KP_NOSE    = 0
 KP_L_WRIST = 9
 KP_R_WRIST = 10
+
+# ── V5 PRO Visual Engine ───────────────────────────────────────────────
+REPLAY_SPEED_THRESHOLD = float(os.getenv("REPLAY_SPEED_THRESHOLD", "5.5"))  # m/s para trigger replay
+REPLAY_BUFFER_FRAMES   = int(os.getenv("REPLAY_BUFFER_FRAMES",   "120"))    # ~4s @ 30fps
+HIT_EFFECT_FRAMES      = int(os.getenv("HIT_EFFECT_FRAMES",       "18"))    # duración animación HIT
+HEATMAP_BLUR_RADIUS    = int(os.getenv("HEATMAP_BLUR_RADIUS",     "30"))    # radio blur gaussiano (px)
