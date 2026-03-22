@@ -30,6 +30,74 @@ from fighterid_vision_engine.config.settings import (
 )
 
 
+def discover_fight_id() -> "str | None":
+    """
+    Autodescubre el fight_id consultando fight_telemetry_sessions en Supabase.
+
+    Orden de intentos:
+      1. REST directo → fight_telemetry_sessions?status=eq.active
+      2. Edge function → /vision/get-active-session
+
+    Retorna el fight_id (str) de la sesión activa más reciente, o None si no
+    hay ninguna sesión activa o si API_ENABLED=false.
+    """
+    from fighterid_vision_engine.config.settings import (
+        SUPABASE_URL, SUPABASE_ANON_KEY,
+        FIGHTERID_EDGE_URL, API_ENABLED as _api_enabled,
+    )
+    if not _api_enabled:
+        return None
+
+    anon_headers = {
+        "apikey":        SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+    }
+
+    # Intento 1: REST directo
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/fight_telemetry_sessions",
+            headers=anon_headers,
+            params={
+                "select": "fight_id",
+                "status": "eq.active",
+                "order":  "created_at.desc",
+                "limit":  "1",
+            },
+            timeout=5,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if data and data[0].get("fight_id"):
+                return data[0]["fight_id"]
+        else:
+            print(f"[DISCOVER] REST → HTTP {r.status_code}")
+    except Exception as e:
+        print(f"[DISCOVER] REST error: {e}")
+
+    # Intento 2: edge function fallback
+    try:
+        r = requests.get(
+            f"{FIGHTERID_EDGE_URL}/vision/get-active-session",
+            headers={
+                "apikey":        FIGHTERID_API_KEY,
+                "Authorization": f"Bearer {FIGHTERID_API_KEY}",
+            },
+            timeout=5,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            fid = data.get("fight_id") or data.get("id")
+            if fid:
+                return fid
+        else:
+            print(f"[DISCOVER] edge function → HTTP {r.status_code}")
+    except Exception as e:
+        print(f"[DISCOVER] edge function error: {e}")
+
+    return None
+
+
 # ══════════════════════════════════════════════════════════════════
 #  FIGHTER ID API — consume la web, no inventa datos
 # ══════════════════════════════════════════════════════════════════
