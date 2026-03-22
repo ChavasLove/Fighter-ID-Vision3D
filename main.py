@@ -63,12 +63,23 @@ def main() -> None:
     fight_id = args.fight_id or os.environ.get("FIGHT_ID")
 
     if not fight_id:
-        print("[ERROR] Se requiere fight_id para arrancar el motor.")
-        print("        La web crea el fight_id — el motor NUNCA lo inventa.")
+        print("[MOTOR] Buscando sesión activa en Supabase...")
+        from fighterid_vision_engine.pipeline.engine import discover_fight_id
+        fight_id = discover_fight_id()
+
+    if not fight_id:
+        print("[ERROR] No hay sesión activa en Supabase.")
+        print("        Crea una sesión desde la web (fighter-id.org) primero.")
         print()
-        print("  Opción A:  python main.py --fight-id <uuid>")
-        print("  Opción B:  FIGHT_ID=<uuid> python main.py")
+        print("  Override manual:  python main.py --fight-id <uuid>")
         sys.exit(1)
+
+    if args.fight_id:
+        print(f"[SOURCE] fight_id desde CLI: {fight_id}")
+    elif os.environ.get("FIGHT_ID"):
+        print(f"[SOURCE] fight_id desde ENV: {fight_id}")
+    else:
+        print(f"[SOURCE] fight_id desde AUTO-DISCOVERY: {fight_id}")
 
     motor = VisionMotorV1(
         fight_id=fight_id,
