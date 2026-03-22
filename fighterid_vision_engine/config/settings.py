@@ -3,7 +3,7 @@ FighterID Vision Engine — configuración central
 Lee variables desde .env (o del entorno del sistema).
 
 Crea un archivo .env en la raíz del proyecto con el contenido de .env.example.
-Si no existe .env, usa los valores por defecto hardcodeados aquí.
+Las credenciales NO están hardcodeadas aquí — deben definirse en .env.
 """
 
 import os
@@ -15,18 +15,13 @@ except ImportError:
     pass  # Sin python-dotenv, usa solo os.environ
 
 # ── Supabase ──────────────────────────────────────────────────────────
-SUPABASE_URL      = os.getenv(
-    "SUPABASE_URL",
-    "https://eeshomcqztvjkvycdfwi.supabase.co",
-)
-SUPABASE_ANON_KEY = os.getenv(
-    "SUPABASE_ANON_KEY",
-    (
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
-        ".eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVlc2hvbWNxenR2amt2eWNkZndpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYyNDUyMDAsImV4cCI6MjA3MTgyMTIwMH0"
-        ".JbOPpqzJvzojVRP3hV4QuDeetzRVpRxoaZeBAXrCb2c"
-    ),
-)
+SUPABASE_URL      = os.getenv("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+
+if not SUPABASE_URL:
+    print("[CONFIG] ⚠  SUPABASE_URL no definida — crea .env desde .env.example")
+if not SUPABASE_ANON_KEY:
+    print("[CONFIG] ⚠  SUPABASE_ANON_KEY no definida — crea .env desde .env.example")
 
 # ── URL validation helper ──────────────────────────────────────────────
 def _require_url(env_key: str, fallback: str) -> str:
@@ -56,10 +51,7 @@ FIGHTERID_API_URL  = _require_url(
     "FIGHTERID_API_URL",
     f"{SUPABASE_URL}/functions/v1/ai-strike-ingest",
 )
-FIGHTERID_API_KEY  = os.getenv(
-    "FIGHTERID_API_KEY",
-    SUPABASE_ANON_KEY,
-)
+FIGHTERID_API_KEY  = os.getenv("FIGHTERID_API_KEY", SUPABASE_ANON_KEY)
 
 # ── Interruptor general de API ─────────────────────────────────────────
 API_ENABLED = os.getenv("API_ENABLED", "true").strip().lower() == "true"
