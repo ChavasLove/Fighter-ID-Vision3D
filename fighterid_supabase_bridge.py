@@ -77,6 +77,9 @@ class FighterIDAPI:
         self._queue         = deque(maxlen=500)
         self._session_queue = deque(maxlen=20)
 
+        # Mutex para estado compartido entre threads worker / session / heartbeat
+        self._state_lock = threading.Lock()
+
         self._thread    = threading.Thread(target=self._worker,
                           daemon=True, name="FighterIDAPI")
         self._session   = threading.Thread(target=self._session_worker,
@@ -93,7 +96,7 @@ class FighterIDAPI:
         # Realtime subscription — re-sync if web changes the active fight_id
         self.listen_fight_changes()
 
-        # Session state
+        # Session state  (proteger con _state_lock para writes concurrentes)
         self._db          = None          # supabase client (lazy)
         self._session_id  = None          # fight_telemetry_sessions.id (uuid)
         self._session_token = None        # fight_telemetry_sessions.session_token
@@ -172,13 +175,14 @@ class FighterIDAPI:
                 print("[FighterIDAPI] fetch_active_session: sin sesión activa")
                 return None
             row = res.data[0]
-            self._session_id    = row["id"]
-            self._session_token = row.get("session_token")
-            self._fighter_red_id  = row.get("fighter_red_id")
-            self._fighter_blue_id = row.get("fighter_blue_id")
-            # Usar fight_id de la DB si existe — evita FK constraint en ai_fight_results
-            if row.get("fight_id"):
-                self._fight_id = row["fight_id"]
+            with self._state_lock:
+                self._session_id      = row["id"]
+                self._session_token   = row.get("session_token")
+                self._fighter_red_id  = row.get("fighter_red_id")
+                self._fighter_blue_id = row.get("fighter_blue_id")
+                # Usar fight_id de la DB si existe — evita FK constraint en ai_fight_results
+                if row.get("fight_id"):
+                    self._fight_id = row["fight_id"]
             print(f"[FighterIDAPI] sesión activa → id={self._session_id}"
                   f"  fight_id={self._fight_id or '(pendiente)'}")
             return row
@@ -295,12 +299,13 @@ class FighterIDAPI:
             res = db.table("fight_telemetry_sessions").insert(row).execute()
             if res.data:
                 created = res.data[0]
-                self._session_id      = created["id"]
-                self._session_token   = created.get("session_token", session_token)
-                # fight_id comes from the DB — never from a local uuid4()
-                self._fight_id        = created.get("fight_id")
-                self._fighter_red_id  = red_id
-                self._fighter_blue_id = blue_id
+                with self._state_lock:
+                    self._session_id      = created["id"]
+                    self._session_token   = created.get("session_token", session_token)
+                    # fight_id comes from the DB — never from a local uuid4()
+                    self._fight_id        = created.get("fight_id")
+                    self._fighter_red_id  = red_id
+                    self._fighter_blue_id = blue_id
                 print(f"[FighterIDAPI] sesión oficial creada → id={self._session_id}"
                       f"  fight_id={self._fight_id}")
                 return created
@@ -531,7 +536,16 @@ class FighterIDAPI:
 
     def send(self, fighter_id, punch_type, speed, extension, hit,
              face_hit, body_hit, elbow_angle=0.0):
-        if not self._fight_id:
+        with self._state_lock:
+            fight_id      = self._fight_id
+            session_id    = self._session_id
+            session_token = self._session_token
+            round_num     = self._round_num
+            db_fighter_id = (self._fighter_red_id
+                             if fighter_id == "red"
+                             else self._fighter_blue_id)
+
+        if not fight_id:
             return
 
         confidence   = min(max(speed / 25.0, 0.05), 1.0)
@@ -539,20 +553,15 @@ class FighterIDAPI:
         strike_type  = _PUNCH_TYPE_MAP.get(punch_type.lower(), "other")
         event_type   = "strike_connected" if hit else "strike_attempted"
 
-        # Map corner → DB fighter UUID
-        db_fighter_id = (self._fighter_red_id
-                         if fighter_id == "red"
-                         else self._fighter_blue_id)
-
         evt = {
             # DB fields (used by _send_event_to_db)
-            "_session_id":    self._session_id,
+            "_session_id":    session_id,
             "_fighter_id":    db_fighter_id,
             "_fighter_corner": fighter_id,          # "red" | "blue"
             # Edge-function fields (ai-strike-ingest/event)
-            "sessionId":      self._session_id,          # FK requerida por ai_strike_events
-            "fightId":        self._fight_id,
-            "round":          self._round_num,
+            "sessionId":      session_id,
+            "fightId":        fight_id,
+            "round":          round_num,
             "timestamp_ms":   int(time.time() * 1000),
             "fighter":        fighter_slot,
             "event":          event_type,
@@ -568,8 +577,8 @@ class FighterIDAPI:
                 "original_type": punch_type,
             },
         }
-        if self._session_token:
-            evt["session_token"] = self._session_token
+        if session_token:
+            evt["session_token"] = session_token
         self._queue.append(evt)
 
     # ------------------------------------------------------------------
@@ -746,17 +755,22 @@ class FighterIDAPI:
     def _heartbeat_worker(self):
         while True:
             time.sleep(_HEARTBEAT_INTERVAL)
-            if not self._fight_id:
+            with self._state_lock:
+                fight_id      = self._fight_id
+                session_id    = self._session_id
+                session_token = self._session_token
+
+            if not fight_id:
                 continue
 
             db = self._get_db()
-            if db and self._session_id:
+            if db and session_id:
                 # Direct DB update — fastest path, no edge function overhead
                 try:
                     db.table("fight_telemetry_sessions").update({
                         "vision_connected": True,
                         "last_heartbeat":   "now()",
-                    }).eq("id", self._session_id).execute()
+                    }).eq("id", session_id).execute()
                     continue
                 except Exception as e:
                     if self._is_disconnect(e):
@@ -765,9 +779,9 @@ class FighterIDAPI:
 
             # Fallback: POST vision-start-session/telemetry
             self._post_vsync("telemetry", {
-                "session_id":    self._session_id,
-                "fight_id":      self._fight_id,
-                "session_token": self._session_token,
+                "session_id":    session_id,
+                "fight_id":      fight_id,
+                "session_token": session_token,
                 "engine":        "vision-ai-v1",
                 "timestamp_ms":  int(time.time() * 1000),
             })

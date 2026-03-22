@@ -120,13 +120,22 @@ STANCE_THRESH_M      = 0.04   # Shoulder X-diff threshold for stance detection
 POWER_PUNCH_TYPES  = {"CROSS", "HOOK", "UPPERCUT", "OVERHAND"}
 SCORING_PUNCH_TYPES = {"JAB", "CROSS", "HOOK", "UPPERCUT", "OVERHAND", "BODYSHOT"}
 
-# FighterID Platform API
-SUPABASE_URL      = "https://eeshomcqztvjkvycdfwi.supabase.co"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVlc2hvbWNxenR2amt2eWNkZndpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYyNDUyMDAsImV4cCI6MjA3MTgyMTIwMH0.JbOPpqzJvzojVRP3hV4QuDeetzRVpRxoaZeBAXrCb2c"
-FIGHTERID_EDGE_URL = f"{SUPABASE_URL}/functions/v1"
-FIGHTERID_API_URL  = f"{SUPABASE_URL}/functions/v1/ai-strike-ingest"
-FIGHTERID_API_KEY  = SUPABASE_ANON_KEY
-API_ENABLED        = True
+# FighterID Platform API — credenciales desde .env (nunca hardcodeadas)
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv()
+except ImportError:
+    pass
+SUPABASE_URL      = os.getenv("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+if not SUPABASE_URL:
+    print("[CONFIG] ⚠  SUPABASE_URL no definida — crea .env desde .env.example")
+if not SUPABASE_ANON_KEY:
+    print("[CONFIG] ⚠  SUPABASE_ANON_KEY no definida — crea .env desde .env.example")
+FIGHTERID_EDGE_URL = os.getenv("FIGHTERID_EDGE_URL", f"{SUPABASE_URL}/functions/v1")
+FIGHTERID_API_URL  = os.getenv("FIGHTERID_API_URL",  f"{SUPABASE_URL}/functions/v1/ai-strike-ingest")
+FIGHTERID_API_KEY  = os.getenv("FIGHTERID_API_KEY",  SUPABASE_ANON_KEY)
+API_ENABLED        = os.getenv("API_ENABLED", "true").strip().lower() == "true"
 MODEL_VERSION      = BUILD_VERSION
 
 # Dataset capture
@@ -135,8 +144,7 @@ DATASET_ENABLED = False
 
 # ── Live Stream — Supabase + RTMP ──────────────────────────────────────────────
 # Configurar via botón ⚙ EN VIVO en la barra lateral o editando fighterid_stream.json
-SUPABASE_URL          = "https://eeshomcqztvjkvycdfwi.supabase.co"
-SUPABASE_ANON_KEY     = "sb_publishable_3H9okQFv3LCQv3wxsxiwvg_WdF_f25z"
+# SUPABASE_URL / SUPABASE_ANON_KEY ya cargados desde .env arriba
 SUPABASE_TABLE_LIVE   = "live_session"
 SUPABASE_TABLE_ROUNDS = "round_results"
 STREAM_RTMP_URL       = ""   # rtmp://... (YouTube/Twitch/Mux/custom — opcional)

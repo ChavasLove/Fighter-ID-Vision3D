@@ -91,7 +91,10 @@ def discover_fight_id() -> "str | None":
 
 
 # ══════════════════════════════════════════════════════════════════
-#  FIGHTER ID API — consume la web, no inventa datos
+#  FIGHTER ID API — cliente HTTP para modo headless (main.py)
+#  NOTA: Esta clase es específica de VisionMotorV1 (modo sin GUI).
+#  Para el motor con GUI (three_camera_ui.py, main_gui.py) se usa
+#  FighterIDAPI de fighterid_supabase_bridge.py (SDK + fallback HTTP).
 # ══════════════════════════════════════════════════════════════════
 class FighterIDAPI:
     """

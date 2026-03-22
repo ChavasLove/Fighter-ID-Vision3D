@@ -37,6 +37,15 @@ except ImportError:
     except ImportError:
         print("[GPU] Sin GPU acelerada — usando CPU")
 
+# ── Supabase bridge (opcional — requiere supabase-py + .env) ─────────
+try:
+    from fighterid_supabase_bridge import FighterIDAPI as _FighterIDAPI
+    _FAPI = _FighterIDAPI()
+    print("[API] Supabase listo")
+except Exception as _fapi_err:
+    _FAPI = None
+    print(f"[API] Sin Supabase ({_fapi_err})")
+
 # ══════════════════════════════════════════════════════════════════
 #  VERSION  —  actualizar en cada push significativo
 # ══════════════════════════════════════════════════════════════════
@@ -862,6 +871,18 @@ class VisionEngine(threading.Thread):
                                     hb  = pk > EXTENSION_THR_M * 2.5; hf = False
                                 else:
                                     hb, hf = self._check_hit(wp3, pid_a)
+                                # ── Telemetría Supabase ────────────────────────
+                                if _FAPI and _FAPI._fight_id:
+                                    _corner = ("red"  if pid_a == rp else
+                                               "blue" if pid_a == bp else
+                                               "red"  if pid_a == tp else None)
+                                    if _corner:
+                                        _ext = dist3d(wp3, sp3) if sp3 else 0.0
+                                        try:
+                                            _FAPI.send(_corner, ptype, spd, _ext,
+                                                       bool(hb or hf), bool(hf), bool(hb))
+                                        except Exception:
+                                            pass
                                 if hb or hf:
                                     ftr.connected += 1
                                     if self.tm: self._ts['hd'] += 1
@@ -960,6 +981,143 @@ class VisionEngine(threading.Thread):
         if cap_c: cap_c.release()
 
 # ══════════════════════════════════════════════════════════════════
+#  FIGHTER SELECT DIALOG  —  selección de peleadores + sesión oficial
+# ══════════════════════════════════════════════════════════════════
+class FighterSelectDialog(ctk.CTkToplevel):
+    """Carga perfiles desde Supabase y crea una fight_telemetry_sessions row."""
+
+    def __init__(self, parent, on_created):
+        super().__init__(parent)
+        self.title("Sesión Oficial — Peleadores")
+        self.geometry("460x400")
+        self.resizable(False, False)
+        self.grab_set()
+        self._on_created = on_created   # callback(red_name, blue_name)
+        self._profiles   = []
+        self._red_id     = None
+        self._blue_id    = None
+        self._build()
+        self.after(150, self._load)
+
+    def _build(self):
+        B = dict(corner_radius=7, height=34, font=ctk.CTkFont(size=12, weight="bold"))
+
+        ctk.CTkLabel(self, text="Sesión Oficial",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=GUI_CYAN).pack(anchor="w", padx=18, pady=(14, 2))
+
+        ctk.CTkLabel(self, text="Esquina ROJA",
+            font=ctk.CTkFont(size=10), text_color=GUI_RED
+        ).pack(anchor="w", padx=18, pady=(8, 0))
+        self._red_cb = ctk.CTkComboBox(self, values=["Cargando…"],
+            fg_color=GUI_CARD, border_color=GUI_RED,
+            button_color=GUI_RED, hover=False,
+            command=self._on_red_select, width=424, height=34)
+        self._red_cb.set("— seleccionar —")
+        self._red_cb.pack(padx=18, pady=2)
+
+        ctk.CTkLabel(self, text="Esquina AZUL",
+            font=ctk.CTkFont(size=10), text_color=GUI_BLUE
+        ).pack(anchor="w", padx=18, pady=(8, 0))
+        self._blue_cb = ctk.CTkComboBox(self, values=["Cargando…"],
+            fg_color=GUI_CARD, border_color=GUI_BLUE,
+            button_color=GUI_BLUE, hover=False,
+            command=self._on_blue_select, width=424, height=34)
+        self._blue_cb.set("— seleccionar —")
+        self._blue_cb.pack(padx=18, pady=2)
+
+        rnd_row = ctk.CTkFrame(self, fg_color="transparent")
+        rnd_row.pack(fill="x", padx=18, pady=(12, 4))
+        ctk.CTkLabel(rnd_row, text="Rounds:",
+            font=ctk.CTkFont(size=11), text_color=GUI_GRAY).pack(side="left")
+        self._rounds_var = ctk.StringVar(value="3")
+        for r in ("1", "3", "5"):
+            ctk.CTkRadioButton(rnd_row, text=r, variable=self._rounds_var, value=r,
+                fg_color=GUI_CYAN, text_color=GUI_WHITE,
+                font=ctk.CTkFont(size=11)).pack(side="left", padx=8)
+
+        self._status = ctk.CTkLabel(self,
+            text="Cargando peleadores de Supabase…",
+            font=ctk.CTkFont(size=10), text_color=GUI_GRAY)
+        self._status.pack(pady=(4, 0))
+
+        ctk.CTkFrame(self, height=1, fg_color=GUI_BORDER).pack(fill="x", padx=18, pady=10)
+        self._ok_btn = ctk.CTkButton(self, text="CREAR SESIÓN",
+            fg_color=GUI_GREEN, text_color=GUI_BG, hover_color="#28b84e",
+            command=self._create, **B)
+        self._ok_btn.pack(fill="x", padx=18, pady=(0, 14))
+
+    def _load(self):
+        def _fetch():
+            profiles = _FAPI.list_fighter_profiles() if _FAPI else []
+            self.after(0, lambda: self._on_loaded(profiles))
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _on_loaded(self, profiles):
+        if not self.winfo_exists():
+            return
+        self._profiles = profiles
+        names = [f"{p['name']} [{p.get('weight_class', '?')}]" for p in profiles]
+        if not names:
+            self._status.configure(
+                text="Sin peleadores — verifica conexión Supabase",
+                text_color=GUI_ORANGE)
+            return
+        self._red_cb.configure(values=names)
+        self._blue_cb.configure(values=names)
+        self._red_cb.set(names[0])
+        self._red_id = profiles[0]["id"]
+        self._status.configure(
+            text=f"{len(profiles)} peleadores cargados",
+            text_color=GUI_GRAY)
+
+    def _on_red_select(self, val):
+        self._red_id = next(
+            (p["id"] for p in self._profiles if val.startswith(p["name"])), None)
+
+    def _on_blue_select(self, val):
+        self._blue_id = next(
+            (p["id"] for p in self._profiles if val.startswith(p["name"])), None)
+
+    def _create(self):
+        if not _FAPI:
+            self._status.configure(text="Sin conexión a Supabase", text_color=GUI_ORANGE)
+            return
+        if not self._red_id or not self._blue_id:
+            self._status.configure(text="Selecciona ambos peleadores", text_color=GUI_ORANGE)
+            return
+        if self._red_id == self._blue_id:
+            self._status.configure(
+                text="Los peleadores deben ser diferentes", text_color=GUI_ORANGE)
+            return
+        rounds = int(self._rounds_var.get())
+        self._ok_btn.configure(state="disabled", text="Creando…")
+        self._status.configure(text="Creando sesión en Supabase…", text_color=GUI_GRAY)
+        red_name  = next((p["name"] for p in self._profiles if p["id"] == self._red_id),  "Rojo")
+        blue_name = next((p["name"] for p in self._profiles if p["id"] == self._blue_id), "Azul")
+
+        def _do():
+            row = _FAPI.create_fight_session(self._red_id, self._blue_id, rounds)
+            self.after(0, lambda: self._done(row, red_name, blue_name))
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _done(self, row, red_name, blue_name):
+        if not self.winfo_exists():
+            return
+        if row:
+            fid = str(row.get("fight_id", ""))[:8]
+            self._status.configure(
+                text=f"Sesión creada  {fid}…", text_color=GUI_GREEN)
+            if self._on_created:
+                self._on_created(red_name, blue_name)
+            self.after(1800, self.destroy)
+        else:
+            self._ok_btn.configure(state="normal", text="CREAR SESIÓN")
+            self._status.configure(
+                text="Error al crear sesión — reintenta", text_color=GUI_RED)
+
+
+# ══════════════════════════════════════════════════════════════════
 #  STAT CARD
 # ══════════════════════════════════════════════════════════════════
 class StatCard(ctk.CTkFrame):
@@ -1047,7 +1205,22 @@ class FighterIDApp(ctk.CTk):
             text_color=GUI_GRAY).pack(anchor="w", padx=14, pady=(5, 2))
 
         ctk.CTkFrame(parent, height=12, fg_color="transparent").pack()
-        lbl("SESIÓN")
+        lbl("SESIÓN OFICIAL")
+        self._lbl_red_name = ctk.CTkLabel(parent, text="🔴 —",
+            font=ctk.CTkFont(size=10), text_color=GUI_RED,
+            wraplength=145, anchor="w", justify="left")
+        self._lbl_red_name.pack(anchor="w", padx=14, pady=(0, 1))
+        self._lbl_blue_name = ctk.CTkLabel(parent, text="🔵 —",
+            font=ctk.CTkFont(size=10), text_color=GUI_BLUE,
+            wraplength=145, anchor="w", justify="left")
+        self._lbl_blue_name.pack(anchor="w", padx=14, pady=(0, 2))
+        ctk.CTkButton(parent, text="＋  NUEVA SESIÓN",
+            fg_color=GUI_PANEL, text_color=GUI_CYAN,
+            border_color=GUI_CYAN, border_width=1,
+            hover_color=GUI_CARD,
+            command=self._cmd_new_session, **B).pack(fill="x", padx=12, pady=2)
+
+        sep(); lbl("SESIÓN")
         ctk.CTkButton(parent, text="▶  INICIAR", fg_color=GUI_GREEN,
             text_color=GUI_BG, hover_color="#28b84e",
             command=self._cmd_start, **B).pack(fill="x", padx=12, pady=2)
@@ -1270,6 +1443,21 @@ class FighterIDApp(ctk.CTk):
             pass
 
     # ── Comandos ───────────────────────────────────────────────────
+    def _cmd_new_session(self):
+        if not _FAPI:
+            self._top_status.configure(
+                text="⚠ Sin Supabase — revisa .env", text_color=GUI_ORANGE)
+            return
+        FighterSelectDialog(self, self._on_session_created)
+
+    def _on_session_created(self, red_name, blue_name):
+        self._lbl_red_name.configure(text=f"🔴 {red_name}")
+        self._lbl_blue_name.configure(text=f"🔵 {blue_name}")
+        self._top_status.configure(
+            text=f"{red_name} vs {blue_name}", text_color=GUI_CYAN)
+        if _FAPI:
+            threading.Thread(target=_FAPI.start_session_test, daemon=True).start()
+
     def _cmd_start(self):
         if self._engine and not self._engine.cmd_start():
             self._top_status.configure(text="⚠ Asigna roles primero", text_color=GUI_YELLOW)

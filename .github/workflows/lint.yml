@@ -1,0 +1,66 @@
+name: CI — Lint & Security
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  security:
+    name: Security check — no hardcoded credentials
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verifica que no hay JWT hardcodeado
+        run: |
+          # Busca el patrón JWT (eyJ...) en archivos Python
+          if grep -rn "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" --include="*.py" .; then
+            echo "❌ ERROR: JWT hardcodeado encontrado en código fuente"
+            exit 1
+          fi
+          echo "✅ Sin JWT hardcodeados"
+
+      - name: Verifica que no hay sb_publishable_ hardcodeado
+        run: |
+          # Busca claves Supabase publicables hardcodeadas en Python
+          if grep -rn '"sb_publishable_' --include="*.py" .; then
+            echo "❌ ERROR: clave sb_publishable_ hardcodeada encontrada"
+            exit 1
+          fi
+          echo "✅ Sin sb_publishable_ hardcodeados"
+
+      - name: Verifica que .env NO está versionado
+        run: |
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo "❌ ERROR: .env está siendo versionado — elimínalo del repo"
+            exit 1
+          fi
+          echo "✅ .env no está en el repositorio"
+
+  syntax:
+    name: Python syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verifica sintaxis Python en archivos clave
+        run: |
+          python -m py_compile fighterid_supabase_bridge.py && echo "✅ fighterid_supabase_bridge.py"
+          python -m py_compile fighterid_vision_engine/config/settings.py && echo "✅ settings.py"
+          python -m py_compile fighterid_vision_engine/pipeline/engine.py && echo "✅ engine.py"
+          python -m py_compile main.py && echo "✅ main.py"
+
+      - name: Verifica que settings.py no tiene URLs hardcodeadas
+        run: |
+          if grep -n "eeshomcqztvj" fighterid_vision_engine/config/settings.py; then
+            echo "❌ ERROR: URL de proyecto Supabase hardcodeada en settings.py"
+            exit 1
+          fi
+          echo "✅ settings.py limpio"
