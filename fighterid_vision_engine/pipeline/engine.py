@@ -51,9 +51,10 @@ def discover_fight_id() -> "str | None":
     anon_headers = {
         "apikey":        SUPABASE_ANON_KEY,
         "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+        "Accept":        "application/json",  # requerido por PostgREST
     }
 
-    # Intento 1: REST directo
+    # Intento 1: REST directo → fight_telemetry_sessions
     try:
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/fight_telemetry_sessions",
@@ -70,30 +71,12 @@ def discover_fight_id() -> "str | None":
             data = r.json()
             if data and data[0].get("fight_id"):
                 return data[0]["fight_id"]
+            print("[DISCOVER] REST OK pero sin sesión activa — "
+                  "crea una sesión desde la web primero")
         else:
-            print(f"[DISCOVER] REST → HTTP {r.status_code}")
+            print(f"[DISCOVER] REST → HTTP {r.status_code}: {r.text[:300]}")
     except Exception as e:
         print(f"[DISCOVER] REST error: {e}")
-
-    # Intento 2: edge function fallback
-    try:
-        r = requests.get(
-            f"{FIGHTERID_EDGE_URL}/vision/get-active-session",
-            headers={
-                "apikey":        FIGHTERID_API_KEY,
-                "Authorization": f"Bearer {FIGHTERID_API_KEY}",
-            },
-            timeout=5,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            fid = data.get("fight_id") or data.get("id")
-            if fid:
-                return fid
-        else:
-            print(f"[DISCOVER] edge function → HTTP {r.status_code}")
-    except Exception as e:
-        print(f"[DISCOVER] edge function error: {e}")
 
     return None
 
