@@ -190,26 +190,71 @@ def _load_camera_calibration(path="camera_calibration.json"):
     Carga matrices de calibración desde JSON (opcional).
     Si el archivo no existe, retorna None — el sistema usa el fallback de disparidad.
 
-    Formato esperado del JSON:
-    {
-      "P1": [[f, 0, cx, 0], [0, f, cy, 0], [0, 0, 1, 0]],   // Proyección cámara A
-      "P2": [[f, 0, cx, -f*B], [0, f, cy, 0], [0, 0, 1, 0]] // Proyección cámara B
-    }
+    Soporta dos formatos:
+
+    Formato simple (compatibilidad hacia atrás):
+      {"P1": [[...3x4...]], "P2": [[...3x4...]]}
+
+    Formato completo (generado por tools/calibrate_cameras.py):
+      {
+        "version": 1,
+        "cameras": {"A": {"K": ..., "dist": ...}, "B": {...}, "C": {...}},
+        "stereo": {
+          "AB": {"P1": ..., "P2": ..., "baseline_m": 1.5},
+          "AC": {"P1": ..., "P2": ..., "baseline_m": 1.8}
+        },
+        "P1": ...,  // copia de stereo.AB.P1 para compatibilidad
+        "P2": ...
+      }
+
+    Retorna dict:
+      {"P1": np.array, "P2": np.array,          # par AB (siempre presente si existe)
+       "P1_ac": np.array, "P2_ac": np.array,     # par AC (si existe)
+       "cameras": {...},                          # intrínsecas individuales
+       "baseline_ab": float, "baseline_ac": float}
     """
     try:
         import json
         with open(path) as fp:
             data = json.load(fp)
-        P1 = np.array(data["P1"], dtype=np.float64)
-        P2 = np.array(data["P2"], dtype=np.float64)
-        return {"P1": P1, "P2": P2}
+
+        result = {}
+
+        # ── Formato completo (v1) ──────────────────────────────────────
+        if data.get("version") == 1 and "stereo" in data:
+            stereo = data["stereo"]
+            if "AB" in stereo:
+                result["P1"]          = np.array(stereo["AB"]["P1"], dtype=np.float64)
+                result["P2"]          = np.array(stereo["AB"]["P2"], dtype=np.float64)
+                result["baseline_ab"] = float(stereo["AB"].get("baseline_m", DEFAULT_BASELINE))
+            if "AC" in stereo:
+                result["P1_ac"]       = np.array(stereo["AC"]["P1"], dtype=np.float64)
+                result["P2_ac"]       = np.array(stereo["AC"]["P2"], dtype=np.float64)
+                result["baseline_ac"] = float(stereo["AC"].get("baseline_m",
+                                               DEFAULT_BASELINE * 1.2))
+            if "cameras" in data:
+                result["cameras"] = data["cameras"]
+
+        # ── Formato simple o P1/P2 en raíz ───────────────────────────
+        if "P1" not in result and "P1" in data:
+            result["P1"] = np.array(data["P1"], dtype=np.float64)
+        if "P2" not in result and "P2" in data:
+            result["P2"] = np.array(data["P2"], dtype=np.float64)
+
+        return result if result else None
     except Exception:
         return None
 
 
 _CAM_CALIB = _load_camera_calibration()
 if _CAM_CALIB:
-    print("[CALIB] Matrices de calibración cargadas desde camera_calibration.json")
+    _pairs_loaded = []
+    if "P1" in _CAM_CALIB:    _pairs_loaded.append(f"AB (baseline={_CAM_CALIB.get('baseline_ab', '?')}m)")
+    if "P1_ac" in _CAM_CALIB: _pairs_loaded.append(f"AC (baseline={_CAM_CALIB.get('baseline_ac', '?')}m)")
+    print(f"[CALIB] Matrices cargadas: {', '.join(_pairs_loaded)}")
+    if "cameras" in _CAM_CALIB:
+        for cam_id, cd in _CAM_CALIB["cameras"].items():
+            print(f"[CALIB]   Cámara {cam_id}: RMS={cd.get('rms','?')}px")
 else:
     print("[CALIB] Sin calibración — usando estimación geométrica (triangulación por disparidad)")
 
@@ -570,8 +615,21 @@ class VisionEngine(threading.Thread):
         self.cam_a_idx = cam_a_idx
         self.cam_b_idx = cam_b_idx
         self.cam_c_idx = cam_c_idx
-        self.stereo_ab = StereoFuser(baseline_m=baseline_m,      calib=_CAM_CALIB)
-        self.stereo_ac = StereoFuser(baseline_m=baseline_m * 1.2, calib=_CAM_CALIB)
+        # Calibración específica por par: AB usa P1/P2, AC usa P1_ac/P2_ac
+        _calib_ab = None
+        _calib_ac = None
+        if _CAM_CALIB:
+            if "P1" in _CAM_CALIB and "P2" in _CAM_CALIB:
+                _calib_ab = {"P1": _CAM_CALIB["P1"], "P2": _CAM_CALIB["P2"]}
+            if "P1_ac" in _CAM_CALIB and "P2_ac" in _CAM_CALIB:
+                _calib_ac = {"P1": _CAM_CALIB["P1_ac"], "P2": _CAM_CALIB["P2_ac"]}
+            elif _calib_ab:  # Reutilizar AB si no hay calibración AC separada
+                _calib_ac = _calib_ab
+        _bl_ab = _CAM_CALIB.get("baseline_ab", baseline_m)    if _CAM_CALIB else baseline_m
+        _bl_ac = _CAM_CALIB.get("baseline_ac", baseline_m*1.2) if _CAM_CALIB else baseline_m*1.2
+
+        self.stereo_ab = StereoFuser(baseline_m=_bl_ab, calib=_calib_ab)
+        self.stereo_ac = StereoFuser(baseline_m=_bl_ac, calib=_calib_ac)
 
         self.roles = RoleDetector()
         self.red  = Fighter("ROJA", RED)
