@@ -238,11 +238,12 @@ class InferThread(threading.Thread):
             with self._lk: f = self._fin
             if f is None: continue
             try:
-                r = self.model(f, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False,
-                               device=_GPU_DEVICE)
+                r = self.model(f, imgsz=INFER_IMGSZ, conf=INFER_CONF, verbose=False)
                 with self._lk: self._rout = r
             except Exception as e:
                 print(f"[{self.name}] {e}")
+                if os.getenv("DEBUG_INFER"):
+                    import traceback; traceback.print_exc()
 
 # ══════════════════════════════════════════════════════════════════
 #  HELPERS
@@ -449,7 +450,12 @@ class RoleDetector:
             if pid in (self.test_pid, self.red_pid, self.blue_pid): continue
             wc = sum(d['W']); rc = sum(d['R']); bc = sum(d['B'])
             if wc >= VOTE_NEEDED and wc >= rc and wc >= bc:
-                if self.mode == "none":
+                # Solo entrar en modo test si no hay señales de guantes r/b en otros PIDs
+                has_fight_signals = any(
+                    sum(self._wins[p]['R']) >= 3 or sum(self._wins[p]['B']) >= 3
+                    for p in self._wins if p != pid
+                )
+                if self.mode == "none" and not has_fight_signals:
                     self.test_pid = pid; self.mode = "test"; self.locked = True; return True
             if rc >= VOTE_NEEDED and self.red_pid is None and self.mode != "test":
                 self.red_pid = pid; self.mode = "fight"
@@ -562,7 +568,7 @@ class VisionEngine(threading.Thread):
         return persons
 
     def _find_match(self, kp_a, persons_sec):
-        best = None; best_d = 9999
+        best = None; best_d = 180          # px — umbral máximo de emparejamiento
         for _, kp_b, cf_b, _ in persons_sec:
             na = kp_a[0]; nb = kp_b[0]
             if na[0] > 0 and nb[0] > 0:
@@ -656,11 +662,28 @@ class VisionEngine(threading.Thread):
             c.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             return c
 
-        self._log("Cargando modelo YOLO...")
-        model  = YOLO("yolov8n-pose.pt")
-        inf_a  = InferThread(model, "InferA"); inf_a.start()
-        inf_b  = InferThread(model, "InferB") if self.cam_b_idx is not None else None
-        inf_c  = InferThread(model, "InferC") if self.cam_c_idx is not None else None
+        self._log("Cargando modelos YOLO...")
+        _mk = lambda: YOLO("yolov8n-pose.pt")
+        model_a = _mk()
+        model_b = _mk() if self.cam_b_idx is not None else None
+        model_c = _mk() if self.cam_c_idx is not None else None
+
+        if _GPU_DEVICE is not None:
+            _dml_ok = True
+            for _m in [model_a, model_b, model_c]:
+                if _m is not None:
+                    try:
+                        _m.to(_GPU_DEVICE)
+                    except Exception as _e:
+                        self._log(f"[GPU] DirectML falló ({_e}) — CPU")
+                        _dml_ok = False
+                        break
+            if _dml_ok:
+                self._log("[GPU] Modelos listos en DirectML")
+
+        inf_a  = InferThread(model_a, "InferA"); inf_a.start()
+        inf_b  = InferThread(model_b, "InferB") if model_b is not None else None
+        inf_c  = InferThread(model_c, "InferC") if model_c is not None else None
         if inf_b: inf_b.start()
         if inf_c: inf_c.start()
 
