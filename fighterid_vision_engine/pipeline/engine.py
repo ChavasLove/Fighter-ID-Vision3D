@@ -29,7 +29,13 @@ from fighterid_vision_engine.config.settings import (
     DEVICE_ID,
     API_ENABLED,
     STATS_INTERVAL_S,
+    CAM_W, CAM_H,
+    KP_NOSE,
+    REPLAY_SPEED_THRESHOLD, REPLAY_BUFFER_FRAMES,
+    HIT_EFFECT_FRAMES, HEATMAP_BLUR_RADIUS,
 )
+from fighterid_vision_engine.pipeline.heatmap import HeatmapEngine
+from fighterid_vision_engine.pipeline.replay  import ReplayEngine
 from fighterid_vision_engine.pipeline import fighters_state as _fs
 
 
@@ -262,6 +268,12 @@ class VisionMotorV1:
         self._streams: dict = {}
         self._running  = False
 
+        # V5 PRO visual engines
+        self.heatmap   = HeatmapEngine(height=CAM_H, width=CAM_W,
+                                        blur_radius=HEATMAP_BLUR_RADIUS)
+        self.replay    = ReplayEngine(buffer_size=REPLAY_BUFFER_FRAMES, playback_fps=15)
+        self._effects: list = []   # efectos transitorios activos (HIT! + XP)
+
     def start(self) -> None:
         # 1. Abrir cámaras SIEMPRE — visión no depende del backend
         self._start_cameras()
@@ -308,6 +320,7 @@ class VisionMotorV1:
             try:
                 self.api.start_session(self._fight_id)
                 _fs.reset(time.time())
+                self.heatmap.reset()
                 if self.recorder is None:
                     self.recorder = VideoRecorder(self.api.fight_id, round_num=1)
             except Exception as e:
@@ -322,6 +335,7 @@ class VisionMotorV1:
                     try:
                         self.api.start_session(fight_id)
                         _fs.reset(time.time())
+                        self.heatmap.reset()
                         if self.recorder is None:
                             self.recorder = VideoRecorder(self.api.fight_id, round_num=1)
                     except Exception as e:
@@ -342,6 +356,10 @@ class VisionMotorV1:
             persons = self.detector.infer(frame)
             roles   = self.tracker.assign(persons)
 
+            # Replay: buffer todo frame antes de procesar
+            if self._show:
+                self.replay.add_frame(frame)
+
             if self.recorder is not None:
                 self.recorder.write(frame)
 
@@ -357,9 +375,34 @@ class VisionMotorV1:
                           f"  speed={speed:.2f}m/s  conf={conf:.2f}")
                     self.api.send_event(fighter_id, conf)
 
+                    # V5 PRO: heatmap — posición del oponente como zona de impacto
+                    impact_person = opponent if opponent is not None else person
+                    nose = impact_person["keypoints"][KP_NOSE, :2]
+                    self.heatmap.add_point(int(nose[0]), int(nose[1]))
+
+                    # V5 PRO: animación HIT! + XP sobre bbox del atacante
+                    x1, y1, x2, _ = [int(v) for v in person["bbox"]]
+                    cx = (x1 + x2) // 2
+                    self._effects.append({
+                        "text":        "HIT!",
+                        "xp":          int(speed * 10),
+                        "x":           cx,
+                        "y":           y1,
+                        "color":       (0, 255, 255),
+                        "frames_left": HIT_EFFECT_FRAMES,
+                    })
+
+                    # V5 PRO: replay automático en golpes fuertes
+                    if speed >= REPLAY_SPEED_THRESHOLD:
+                        self.replay.trigger()
+
             if self._show:
                 display = self._annotate(frame, roles, len(persons))
                 cv2.imshow("FighterID Vision", display)
+                # Ventana de replay separada
+                rf = self.replay.tick()
+                if rf is not None:
+                    cv2.imshow(ReplayEngine.WINDOW, rf)
                 if cv2.waitKey(1) & 0xFF == 27:   # ESC para salir
                     self._running = False
 
@@ -386,9 +429,14 @@ class VisionMotorV1:
 
     def _annotate(self, frame: np.ndarray, roles: dict,
                   n_persons: int) -> np.ndarray:
-        """Dibuja bboxes, stats de luchadores y estado de sesión sobre el frame."""
-        disp   = frame.copy()
+        """UFC-style HUD: heatmap + bboxes + stats panels + efectos transitorios."""
+        # 1. Heatmap blend (base del frame)
+        disp = self.heatmap.render(frame)
+
         COLORS = {"red": (0, 0, 255), "blue": (255, 0, 0)}
+        h, w  = disp.shape[:2]
+
+        # 2. Bounding boxes y etiquetas de esquina
         for corner, person in roles.items():
             if person is None:
                 continue
@@ -398,26 +446,66 @@ class VisionMotorV1:
             cv2.putText(disp, corner.upper(), (x1, max(y1 - 8, 0)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-        # Overlay de métricas por luchador
-        overlay_items = [
-            ("RED",  (0, 0, 255),  40),
-            ("BLUE", (255, 0, 0), 100),
+        # 3. Panels de stats — RED (arriba-izq) | BLUE (arriba-der)
+        panels = [
+            ("RED",  (0, 0, 255),   10),
+            ("BLUE", (255, 0, 0),   w - 360),
         ]
-        for fid, color, y in overlay_items:
-            stats = _fs.compute_stats(fid)
-            f     = _fs.fighters_state[fid]
-            label = (f"{fid}: {stats['punches']} golpes | "
-                     f"{stats['avg_velocity']:.1f}m/s | "
-                     f"Lv.{_fs.get_level(f['xp'])} ({f['xp']} XP)")
-            cv2.putText(disp, label, (10, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+        for fid, color, px in panels:
+            stats   = _fs.compute_stats(fid)
+            f       = _fs.fighters_state[fid]
+            xp      = f["xp"]
+            lvl     = _fs.get_level(xp)
+            punches = stats["punches"]
+            acc_pct = round(stats["accuracy"] * 100, 1)
 
-        status = "CONNECTED" if self.api.fight_id else "NO SESSION"
-        s_color = (0, 255, 0) if self.api.fight_id else (0, 0, 255)
-        cv2.putText(disp, status, (10, 140),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, s_color, 2)
-        cv2.putText(disp, f"personas={n_persons}", (10, 170),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+            lines = [
+                f"{fid}  Lv.{lvl}  XP:{xp}",
+                f"Golpes: {punches}  Acc:{acc_pct}%",
+                f"Vel: {stats['avg_velocity']:.1f}m/s  {stats['frequency_per_min']:.1f}/min",
+            ]
+            for i, line in enumerate(lines):
+                cv2.putText(disp, line, (px, 30 + i * 22),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+
+            # Barra de precisión (100px ancho)
+            bar_x, bar_y = px, 100
+            cv2.rectangle(disp, (bar_x, bar_y), (bar_x + 100, bar_y + 8),
+                          (50, 50, 50), -1)
+            fill = min(int(acc_pct), 100)
+            if fill > 0:
+                cv2.rectangle(disp, (bar_x, bar_y), (bar_x + fill, bar_y + 8),
+                              color, -1)
+
+        # 4. Estado de sesión (abajo-izquierda)
+        status  = "CONNECTED" if self.api.fight_id else "NO SESSION"
+        s_color = (0, 255, 0)  if self.api.fight_id else (0, 0, 255)
+        cv2.putText(disp, status, (10, h - 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, s_color, 2)
+        cv2.putText(disp, f"personas={n_persons}", (10, h - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+
+        # 5. Efectos transitorios — HIT! + +XP (fade-out + float-up)
+        next_effects = []
+        for eff in self._effects:
+            ratio = eff["frames_left"] / HIT_EFFECT_FRAMES   # 1.0 → 0.0
+            y_off = int((HIT_EFFECT_FRAMES - eff["frames_left"]) * 1.8)
+            ec    = tuple(int(c * ratio) for c in eff["color"])
+            gc    = (0, int(255 * ratio), 0)
+
+            cv2.putText(disp, eff["text"],
+                        (eff["x"] - 25, eff["y"] - y_off),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, ec, 3)
+            cv2.circle(disp, (eff["x"], eff["y"] - y_off + 20), 24, ec, 2)
+            cv2.putText(disp, f"+{eff['xp']} XP",
+                        (eff["x"] - 20, eff["y"] - y_off + 52),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, gc, 2)
+
+            eff["frames_left"] -= 1
+            if eff["frames_left"] > 0:
+                next_effects.append(eff)
+        self._effects = next_effects
+
         return disp
 
     def stop(self) -> None:
