@@ -673,7 +673,7 @@ class VisionEngine(threading.Thread):
             for _m in [model_a, model_b, model_c]:
                 if _m is not None:
                     try:
-                        _m.to(_GPU_DEVICE)
+                        _m.overrides['device'] = _GPU_DEVICE
                     except Exception as _e:
                         self._log(f"[GPU] DirectML falló ({_e}) — CPU")
                         _dml_ok = False
@@ -920,9 +920,9 @@ class VisionEngine(threading.Thread):
                 cv2.putText(img, ptxt,  (CAM_W-72, 20), FS, 0.42, pc, 1)
                 cv2.putText(img, mtxt,  (CAM_W-72, 54), FS, 0.42, mc, 1)
 
-            hud(img_a, f"CAM A · PRINCIPAL · 3D:{n_3d}/{max(n_total,1)}", GRN)
-            hud(img_b, "CAM B · ÁNGULO B", MAG)
-            hud(img_c, "CAM C · ÁNGULO C", CYN)
+            hud(img_a, f"CAM A | PRINCIPAL | 3D:{n_3d}/{max(n_total,1)}", GRN)
+            hud(img_b, "CAM B | ANGULO B", MAG)
+            hud(img_c, "CAM C | ANGULO C", CYN)
 
             stats = {
                 'rem': rem, 'rnd': self.rnd, 'phase': ph, 'state': st,
