@@ -20,8 +20,8 @@ import requests
 
 from fighterid_vision_engine.camera.capture import CameraStream
 from fighterid_vision_engine.detection.pose import PoseDetector
-from fighterid_vision_engine.detection.tracker import SimpleTracker
-from fighterid_vision_engine.pipeline.strike import StrikeDetector
+from fighterid_vision_engine.detection.tracker import PersistentTracker
+from fighterid_vision_engine.pipeline.temporal_strike import TemporalStrikeAnalyzer
 from fighterid_vision_engine.pipeline.recorder import VideoRecorder
 from fighterid_vision_engine.config.settings import (
     FIGHTERID_API_URL,
@@ -33,6 +33,7 @@ from fighterid_vision_engine.config.settings import (
     KP_NOSE,
     REPLAY_SPEED_THRESHOLD, REPLAY_BUFFER_FRAMES,
     HIT_EFFECT_FRAMES, HEATMAP_BLUR_RADIUS,
+    MULTICAM_CONFIRM_MS,
 )
 from fighterid_vision_engine.pipeline.heatmap import HeatmapEngine
 from fighterid_vision_engine.pipeline.replay  import ReplayEngine
@@ -242,6 +243,79 @@ class FighterIDAPI:
 
 
 # ══════════════════════════════════════════════════════════════════
+#  MULTI-CAM STRIKE VALIDATOR
+#  Confirma golpes sólo si ≥ min_cameras cámaras lo detectaron
+#  dentro de una ventana temporal de MULTICAM_CONFIRM_MS ms.
+# ══════════════════════════════════════════════════════════════════
+class MultiCamStrikeValidator:
+    """
+    Valida golpes cruzando detecciones de múltiples cámaras.
+
+    Flujo:
+      1. Cada cámara llama submit() cuando detecta un golpe
+      2. confirm() retorna True si ≥ min_cameras coincidieron
+         dentro de la ventana temporal
+    """
+
+    def __init__(self, min_cameras: int = 2,
+                 window_ms: float = MULTICAM_CONFIRM_MS):
+        self._min_cameras = min_cameras
+        self._window_s    = window_ms / 1000.0
+        # corner → list of {camera_id, speed, confidence, punch_type, timestamp}
+        self._pending: dict[str, list] = {}
+
+    def submit(self, corner: str, camera_id: str,
+               speed: float, confidence: float,
+               punch_type: str, timestamp: float) -> None:
+        """Registra detección de golpe desde una cámara."""
+        if corner not in self._pending:
+            self._pending[corner] = []
+        self._pending[corner].append({
+            "camera_id":  camera_id,
+            "speed":      speed,
+            "confidence": confidence,
+            "punch_type": punch_type,
+            "timestamp":  timestamp,
+        })
+        self._prune(corner, timestamp)
+
+    def confirm(self, corner: str) -> tuple[bool, float, float, str]:
+        """
+        Verifica si hay confirmación multi-cámara para este corner.
+
+        Retorna (confirmed, avg_speed, avg_confidence, punch_type).
+        Si confirmed → limpia las entradas pendientes.
+        """
+        now       = time.time()
+        entries   = self._pending.get(corner, [])
+        entries   = [e for e in entries if now - e["timestamp"] <= self._window_s]
+        self._pending[corner] = entries
+
+        if len(entries) < self._min_cameras:
+            return False, 0.0, 0.0, ""
+
+        avg_speed = float(np.mean([e["speed"] for e in entries]))
+        avg_conf  = float(np.mean([e["confidence"] for e in entries]))
+        # Tipo de golpe: el más frecuente entre las cámaras
+        types     = [e["punch_type"] for e in entries if e["punch_type"]]
+        punch_type = max(set(types), key=types.count) if types else "punch"
+
+        self._pending[corner] = []   # limpiar tras confirmar
+        return True, avg_speed, avg_conf, punch_type
+
+    def _prune(self, corner: str, now: float) -> None:
+        """Elimina entradas antiguas fuera de la ventana temporal."""
+        self._pending[corner] = [
+            e for e in self._pending.get(corner, [])
+            if now - e["timestamp"] <= self._window_s
+        ]
+
+    def set_min_cameras(self, n: int) -> None:
+        """Ajusta el umbral mínimo de cámaras en tiempo de ejecución."""
+        self._min_cameras = n
+
+
+# ══════════════════════════════════════════════════════════════════
 #  VISION MOTOR V1 — orquestador principal
 # ══════════════════════════════════════════════════════════════════
 class VisionMotorV1:
@@ -265,8 +339,11 @@ class VisionMotorV1:
         self._show     = show
         self.api       = FighterIDAPI()
         self.detector  = PoseDetector()
-        self.tracker   = SimpleTracker()
-        self.strikes   = StrikeDetector()
+        self.tracker   = PersistentTracker()
+        self.strikes   = TemporalStrikeAnalyzer()
+        # Validador multi-cámara: en modo headless solo 1 cámara activa,
+        # min_cameras=1 para no bloquear confirmaciones.
+        self.multicam  = MultiCamStrikeValidator(min_cameras=1)
         self.recorder  = None
         self._streams: dict = {}
         self._running  = False
@@ -366,38 +443,53 @@ class VisionMotorV1:
             if self.recorder is not None:
                 self.recorder.write(frame)
 
+            now_ts = time.time()
             for corner in ("red", "blue"):
                 person   = roles.get(corner)
                 opponent = roles.get("blue" if corner == "red" else "red")
                 if person is None:
                     continue
-                hit, speed, conf = self.strikes.detect(corner, person, opponent)
+                hit, speed, conf, punch_type = self.strikes.detect(
+                    corner, person, opponent)
                 if hit:
-                    fighter_id = self.api.resolve_fighter(corner)
-                    print(f"[EVENT] fighter={fighter_id}  corner={corner}"
-                          f"  speed={speed:.2f}m/s  conf={conf:.2f}")
-                    self.api.send_event(fighter_id, conf)
+                    self.multicam.submit(corner, "A", speed, conf,
+                                         punch_type, now_ts)
 
-                    # V5 PRO: heatmap — posición del oponente como zona de impacto
-                    impact_person = opponent if opponent is not None else person
-                    nose = impact_person["keypoints"][KP_NOSE, :2]
-                    self.heatmap.add_point(int(nose[0]), int(nose[1]))
+            for corner in ("red", "blue"):
+                confirmed, avg_speed, avg_conf, punch_type = self.multicam.confirm(corner)
+                if not confirmed:
+                    continue
+                person   = roles.get(corner)
+                opponent = roles.get("blue" if corner == "red" else "red")
+                if person is None:
+                    continue
+                fighter_id = self.api.resolve_fighter(corner)
+                print(f"[EVENT] fighter={fighter_id}  corner={corner}"
+                      f"  speed={avg_speed:.2f}m/s  conf={avg_conf:.2f}"
+                      f"  type={punch_type}")
+                self.api.send_event(fighter_id, avg_conf)
 
-                    # V5 PRO: animación HIT! + XP sobre bbox del atacante
-                    x1, y1, x2, _ = [int(v) for v in person["bbox"]]
-                    cx = (x1 + x2) // 2
-                    self._effects.append({
-                        "text":        "HIT!",
-                        "xp":          int(speed * 10),
-                        "x":           cx,
-                        "y":           y1,
-                        "color":       (0, 255, 255),
-                        "frames_left": HIT_EFFECT_FRAMES,
-                    })
+                # V5 PRO: heatmap — posición del oponente como zona de impacto
+                impact_person = opponent if opponent is not None else person
+                nose = impact_person["keypoints"][KP_NOSE, :2]
+                self.heatmap.add_point(int(nose[0]), int(nose[1]))
 
-                    # V5 PRO: replay automático en golpes fuertes
-                    if speed >= REPLAY_SPEED_THRESHOLD:
-                        self.replay.trigger()
+                # V5 PRO: animación HIT! + XP sobre bbox del atacante
+                x1, y1, x2, _ = [int(v) for v in person["bbox"]]
+                cx = (x1 + x2) // 2
+                type_label = f"HIT! {punch_type.upper()}" if punch_type else "HIT!"
+                self._effects.append({
+                    "text":        type_label,
+                    "xp":          int(avg_speed * 10),
+                    "x":           cx,
+                    "y":           y1,
+                    "color":       (0, 255, 255),
+                    "frames_left": HIT_EFFECT_FRAMES,
+                })
+
+                # V5 PRO: replay automático en golpes fuertes
+                if avg_speed >= REPLAY_SPEED_THRESHOLD:
+                    self.replay.trigger()
 
             if self._show:
                 display = self._annotate(frame, roles, len(persons))

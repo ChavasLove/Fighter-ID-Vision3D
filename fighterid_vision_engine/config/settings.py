@@ -80,9 +80,27 @@ POSE_CONF_THR = float(os.getenv("POSE_CONF_THR", "0.25"))
 STATS_INTERVAL_S = float(os.getenv("STATS_INTERVAL_S", "1.5"))  # segundos entre cada POST /stats
 
 # ── COCO keypoint indices ──────────────────────────────────────────────
-KP_NOSE    = 0
-KP_L_WRIST = 9
-KP_R_WRIST = 10
+KP_NOSE      = 0
+KP_L_SHOULDER= 5
+KP_R_SHOULDER= 6
+KP_L_ELBOW   = 7
+KP_R_ELBOW   = 8
+KP_L_WRIST   = 9
+KP_R_WRIST   = 10
+KP_L_HIP     = 11
+KP_R_HIP     = 12
+
+# ── Análisis temporal de golpes ────────────────────────────────────────
+TEMPORAL_WINDOW_FRAMES  = int(os.getenv("TEMPORAL_WINDOW_FRAMES",  "15"))
+STRIKE_ACCEL_THRESHOLD  = float(os.getenv("STRIKE_ACCEL_THRESHOLD", "20.0"))  # m/s²
+STRIKE_DECEL_REQUIRED   = os.getenv("STRIKE_DECEL_REQUIRED", "true").lower() == "true"
+MULTICAM_CONFIRM_MS     = float(os.getenv("MULTICAM_CONFIRM_MS",    "80.0"))   # ms ventana cross-cámara
+
+# ── Clasificación de golpes ────────────────────────────────────────────
+JAB_MAX_EXTENSION_M     = float(os.getenv("JAB_MAX_EXTENSION_M",    "0.25"))   # m extensión máx jab
+CROSS_MIN_EXTENSION_M   = float(os.getenv("CROSS_MIN_EXTENSION_M",  "0.35"))   # m extensión mín cross
+HOOK_LATERAL_RATIO      = float(os.getenv("HOOK_LATERAL_RATIO",     "0.6"))    # ratio lateral para hook
+UPPERCUT_VERTICAL_RATIO = float(os.getenv("UPPERCUT_VERTICAL_RATIO","0.5"))    # ratio vertical para uppercut
 
 # ── V5 PRO Visual Engine ───────────────────────────────────────────────
 REPLAY_SPEED_THRESHOLD = float(os.getenv("REPLAY_SPEED_THRESHOLD", "5.5"))  # m/s para trigger replay
