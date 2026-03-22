@@ -68,6 +68,8 @@ FOCAL_EST         = CAM_W * 0.8
 CX, CY            = CAM_W / 2, CAM_H / 2
 MAX_CAMS          = 8
 DEFAULT_BASELINE  = 1.50
+# ms — máxima diferencia de timestamp entre cámaras para considerar fusión válida
+SYNC_WINDOW_MS    = 80.0
 
 # OpenCV BGR
 BLK=(8,8,12);   WHT=(255,255,255); GRY=(120,120,120)
@@ -183,15 +185,74 @@ def detect_cameras():
 # ══════════════════════════════════════════════════════════════════
 #  STEREO FUSER
 # ══════════════════════════════════════════════════════════════════
+def _load_camera_calibration(path="camera_calibration.json"):
+    """
+    Carga matrices de calibración desde JSON (opcional).
+    Si el archivo no existe, retorna None — el sistema usa el fallback de disparidad.
+
+    Formato esperado del JSON:
+    {
+      "P1": [[f, 0, cx, 0], [0, f, cy, 0], [0, 0, 1, 0]],   // Proyección cámara A
+      "P2": [[f, 0, cx, -f*B], [0, f, cy, 0], [0, 0, 1, 0]] // Proyección cámara B
+    }
+    """
+    try:
+        import json
+        with open(path) as fp:
+            data = json.load(fp)
+        P1 = np.array(data["P1"], dtype=np.float64)
+        P2 = np.array(data["P2"], dtype=np.float64)
+        return {"P1": P1, "P2": P2}
+    except Exception:
+        return None
+
+
+_CAM_CALIB = _load_camera_calibration()
+if _CAM_CALIB:
+    print("[CALIB] Matrices de calibración cargadas desde camera_calibration.json")
+else:
+    print("[CALIB] Sin calibración — usando estimación geométrica (triangulación por disparidad)")
+
+
 class StereoFuser:
-    def __init__(self, baseline_m=DEFAULT_BASELINE, focal_px=FOCAL_EST, cx=CX, cy=CY):
-        self.B = max(0.05, baseline_m); self.f = focal_px; self.cx = cx; self.cy = cy
+    def __init__(self, baseline_m=DEFAULT_BASELINE, focal_px=FOCAL_EST, cx=CX, cy=CY,
+                 calib=None):
+        self.B    = max(0.05, baseline_m)
+        self.f    = focal_px
+        self.cx   = cx
+        self.cy   = cy
+        self.calib = calib  # dict con P1, P2 (matrices de proyección 3×4)
 
     def triangulate(self, u_a, v_a, u_b, v_b):
+        """
+        Triangulación 3D desde dos vistas.
+
+        Si hay calibración (P1, P2): usa triangulatePoints de OpenCV (DLT).
+        Sin calibración: fallback a profundidad por disparidad horizontal.
+        """
+        if self.calib is not None:
+            try:
+                pts_a = np.array([[float(u_a)], [float(v_a)]], dtype=np.float64)
+                pts_b = np.array([[float(u_b)], [float(v_b)]], dtype=np.float64)
+                pts4d = cv2.triangulatePoints(self.calib["P1"], self.calib["P2"],
+                                              pts_a, pts_b)
+                w = float(pts4d[3])
+                if abs(w) < 1e-8:
+                    return None
+                X, Y, Z = float(pts4d[0]) / w, float(pts4d[1]) / w, float(pts4d[2]) / w
+                if Z < 0.1 or Z > 20.0:
+                    return None
+                return (X, Y, Z)
+            except Exception:
+                pass  # Caer al fallback si algo falla
+
+        # Fallback: profundidad por disparidad horizontal (asume rectificación)
         d = float(u_a) - float(u_b)
-        if abs(d) < 1.0: return None
+        if abs(d) < 1.0:
+            return None
         Z = self.f * self.B / d
-        if Z < 0.1 or Z > 20.0: return None
+        if Z < 0.1 or Z > 20.0:
+            return None
         X = Z * (float(u_a) - self.cx) / self.f
         Y = Z * (float(v_a) - self.cy) / self.f
         return (X, Y, Z)
@@ -509,8 +570,8 @@ class VisionEngine(threading.Thread):
         self.cam_a_idx = cam_a_idx
         self.cam_b_idx = cam_b_idx
         self.cam_c_idx = cam_c_idx
-        self.stereo_ab = StereoFuser(baseline_m=baseline_m)
-        self.stereo_ac = StereoFuser(baseline_m=baseline_m * 1.2)
+        self.stereo_ab = StereoFuser(baseline_m=baseline_m,      calib=_CAM_CALIB)
+        self.stereo_ac = StereoFuser(baseline_m=baseline_m * 1.2, calib=_CAM_CALIB)
 
         self.roles = RoleDetector()
         self.red  = Fighter("ROJA", RED)
@@ -728,20 +789,37 @@ class VisionEngine(threading.Thread):
         cap_c = open_cap(self.cam_c_idx) if self.cam_c_idx is not None else None
 
         last_a = last_b = last_c = None; fc = 0
+        ts_a = ts_b = ts_c = 0.0   # timestamps de captura por cámara
+        _sync_warn_every = 30      # imprimir advertencia de sync cada N frames
+        _sync_warn_fc    = 0
         self._log("Sistema listo ✓")
 
         while self._go:
-            ret_a, frame_a = cap_a.read()
+            ret_a, frame_a = cap_a.read(); ts_a = time.time()
             if not ret_a: time.sleep(0.01); continue
             frame_a = cv2.flip(frame_a, 1)
 
             frame_b = frame_c = None
             if cap_b:
-                ret_b, frame_b = cap_b.read()
+                ret_b, frame_b = cap_b.read(); ts_b = time.time()
                 if ret_b: frame_b = cv2.flip(frame_b, 1)
+                else: ts_b = ts_a
+            else:
+                ts_b = ts_a
             if cap_c:
-                ret_c, frame_c = cap_c.read()
+                ret_c, frame_c = cap_c.read(); ts_c = time.time()
                 if ret_c: frame_c = cv2.flip(frame_c, 1)
+                else: ts_c = ts_a
+            else:
+                ts_c = ts_a
+
+            # ── Diagnóstico de sincronización entre cámaras ──────────────
+            _sync_warn_fc += 1
+            _max_ts_diff_ms = max(abs(ts_b - ts_a), abs(ts_c - ts_a)) * 1000.0
+            _frames_in_sync = _max_ts_diff_ms <= SYNC_WINDOW_MS
+            if not _frames_in_sync and _sync_warn_fc % _sync_warn_every == 0:
+                print(f"[SYNC] ⚠ Frames fuera de ventana: diff={_max_ts_diff_ms:.1f}ms "
+                      f"(umbral={SYNC_WINDOW_MS}ms) — fusión 3D puede ser imprecisa")
 
             fc += 1; ct = time.time()
 
@@ -778,10 +856,13 @@ class VisionEngine(threading.Thread):
             persons_c = self._process_cam(frame_c if frame_c is not None else frame_a, last_c, 200)
 
             fused_data = {}; n_3d = n_total = 0
+            # Solo fusionar entre cámaras si los frames están dentro de la ventana temporal
+            _ab_ok = abs(ts_b - ts_a) * 1000.0 <= SYNC_WINDOW_MS
+            _ac_ok = abs(ts_c - ts_a) * 1000.0 <= SYNC_WINDOW_MS
 
             for pid_a, kp_a, cf_a, gi_a in persons_a:
-                match_b = self._find_match(kp_a, persons_b)
-                match_c = self._find_match(kp_a, persons_c)
+                match_b = self._find_match(kp_a, persons_b) if _ab_ok else None
+                match_c = self._find_match(kp_a, persons_c) if _ac_ok else None
                 if match_b:
                     fused_kp, pts3d, origin = self.stereo_ab.fuse_keypoints(kp_a, match_b[0], cf_a, match_b[1])
                     n_3d += sum(1 for o in origin.values() if o == 'AB')
