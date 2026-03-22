@@ -18,6 +18,7 @@ from fighterid_vision_engine.config.settings import (
     KP_L_WRIST,
     KP_R_WRIST,
 )
+from fighterid_vision_engine.pipeline import fighters_state as _fs
 
 
 class StrikeDetector:
@@ -60,17 +61,28 @@ class StrikeDetector:
         speed_r = float(np.linalg.norm(rw - prev_rw)) / dt / PIX_PER_M
         speed   = max(speed_l, speed_r)
 
+        # Registrar posición de muñeca dominante para tracking de agilidad
+        faster_wrist = rw if speed_r >= speed_l else lw
+        _fs.record_position(corner.upper(), (float(faster_wrist[0]), float(faster_wrist[1])))
+
         if speed < STRIKE_SPEED_MS:
             return False, speed, 0.0
 
         # Verificar distancia al oponente si está disponible
+        is_hit = False
         if opponent is not None:
-            opp_nose  = opponent["keypoints"][KP_NOSE, :2]
-            striker_w = rw if speed_r >= speed_l else lw
-            dist      = float(np.linalg.norm(striker_w - opp_nose)) / PIX_PER_M
+            opp_nose = opponent["keypoints"][KP_NOSE, :2]
+            dist     = float(np.linalg.norm(faster_wrist - opp_nose)) / PIX_PER_M
             if dist > STRIKE_DIST_M:
+                # Velocidad suficiente pero demasiado lejos → miss
+                _fs.record_strike(corner.upper(), speed, is_hit=False)
                 return False, speed, 0.0
+            is_hit = True
+        else:
+            # Sin oponente detectado → contabilizar como miss (velocidad válida)
+            is_hit = False
 
+        _fs.record_strike(corner.upper(), speed, is_hit=is_hit)
         confidence = min(speed / 8.0, 1.0)
         self._last[corner] = now
         return True, speed, confidence
