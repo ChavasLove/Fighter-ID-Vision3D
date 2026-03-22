@@ -22,9 +22,9 @@ scipy>=1.10.0               # Hungarian algorithm (multi-camera matching en main
 # Config — carga .env
 python-dotenv>=1.0.0
 
-# GUI (solo requerido para main_gui.py — NO para main.py headless)
-# customtkinter>=5.2.0
-# pillow>=10.0.0
+# GUI (requerido para main_gui.py y three_camera_ui.py)
+customtkinter>=5.2.0
+pillow>=10.0.0
 
 # GPU DirectML — Intel/AMD/NVIDIA en Windows (DirectX 12)
 torch-directml>=0.2.0
