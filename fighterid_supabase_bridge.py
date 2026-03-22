@@ -252,31 +252,23 @@ class FighterIDAPI:
     def list_fighter_profiles(self):
         """
         Returns list of fighter profile dicts for the session dialog.
-        Each dict: {id, name, nickname, weight_class, gym, total_fights, accuracy}
+        Uses SELECT * so it works regardless of which optional columns exist
+        in the live DB (gym, total_fights, accuracy, etc.).
         """
         db = self._get_db()
         if not db:
             return []
-        cols = "id,name,nickname,weight_class,gym,total_fights,accuracy"
-        for attempt in range(2):
-            try:
-                res = (db.table("fighter_profiles")
-                         .select(cols)
-                         .order("name")
-                         .execute())
-                return res.data or []
-            except Exception as e:
-                err_str = str(e)
-                # Si la columna 'gym' no existe en el DB (código 42703),
-                # reintentar sin ella — ejecuta supabase_migration_add_gym_column.sql
-                if attempt == 0 and '42703' in err_str and 'gym' in err_str:
-                    cols = "id,name,nickname,weight_class,total_fights,accuracy"
-                    continue
-                if self._is_disconnect(e):
-                    self._reset_db()
-                print(f"[FighterIDAPI] list_fighter_profiles error: {e}")
-                return []
-        return []
+        try:
+            res = (db.table("fighter_profiles")
+                     .select("*")
+                     .order("name")
+                     .execute())
+            return res.data or []
+        except Exception as e:
+            if self._is_disconnect(e):
+                self._reset_db()
+            print(f"[FighterIDAPI] list_fighter_profiles error: {e}")
+            return []
 
     def create_fight_session(self, red_id, blue_id, total_rounds=3,
                              model_version="v4.3"):
@@ -539,7 +531,11 @@ class FighterIDAPI:
                 while True:
                     time.sleep(30)
             except Exception as e:
-                print(f"[FighterIDAPI] listen_fight_changes error: {e}")
+                msg = str(e)
+                if any(k in msg.lower() for k in ("sync client", "async client", "async", "realtime", "not available")):
+                    pass  # supabase-py sync client doesn't support realtime — non-critical
+                else:
+                    print(f"[FighterIDAPI] listen_fight_changes error: {e}")
 
         t = threading.Thread(target=_run, daemon=True, name="FighterIDRealtime")
         t.start()
