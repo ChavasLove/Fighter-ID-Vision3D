@@ -64,6 +64,7 @@ MIN_PUNCH_DUR     = 0.05; MAX_PUNCH_DUR     = 0.70
 HIT_R_M           = 0.30; HEAD_HIT_R_M      = 0.20
 DODGE_SPD_MS      = 0.40; HISTORY_LEN       = 20
 CAM_W, CAM_H      = 640,  480
+CAM_FPS           = 60           # FPS objetivo — el driver negocia hacia abajo si no soportado
 FOCAL_EST         = CAM_W * 0.8
 CX, CY            = CAM_W / 2, CAM_H / 2
 MAX_CAMS          = 8
@@ -146,6 +147,8 @@ def detect_cameras():
 
             w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            # Pedir el FPS objetivo para que el driver negocie su máximo soportado
+            cap.set(cv2.CAP_PROP_FPS, CAM_FPS)
             fps = cap.get(cv2.CAP_PROP_FPS)
             # Medir FPS empíricamente si el driver no reporta valor válido
             if fps <= 0 or fps > 240:
@@ -610,11 +613,15 @@ class RoleDetector:
 #  VISION ENGINE  — 3 cámaras
 # ══════════════════════════════════════════════════════════════════
 class VisionEngine(threading.Thread):
-    def __init__(self, cam_a_idx, cam_b_idx, cam_c_idx, baseline_m):
+    def __init__(self, cam_a_idx, cam_b_idx, cam_c_idx, baseline_m,
+                 fps_a=CAM_FPS, fps_b=CAM_FPS, fps_c=CAM_FPS):
         super().__init__(daemon=True)
         self.cam_a_idx = cam_a_idx
         self.cam_b_idx = cam_b_idx
         self.cam_c_idx = cam_c_idx
+        self.fps_a     = fps_a
+        self.fps_b     = fps_b
+        self.fps_c     = fps_c
         # Calibración específica por par: AB usa P1/P2, AC usa P1_ac/P2_ac
         _calib_ab = None
         _calib_ac = None
@@ -792,12 +799,14 @@ class VisionEngine(threading.Thread):
 
     # ── Loop principal ─────────────────────────────────────────────
     def run(self):
-        def open_cap(idx):
+        def open_cap(idx, fps=CAM_FPS):
             c = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
             c.set(cv2.CAP_PROP_FRAME_WIDTH,  CAM_W)
             c.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
-            c.set(cv2.CAP_PROP_FPS, 30)
+            c.set(cv2.CAP_PROP_FPS, fps)
             c.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            actual = c.get(cv2.CAP_PROP_FPS)
+            self._log(f"CAM idx={idx}  fps solicitado={fps:.0f}  negociado={actual:.0f}")
             return c
 
         self._log("Cargando modelos YOLO...")
@@ -842,9 +851,9 @@ class VisionEngine(threading.Thread):
         if inf_b: inf_b.start()
         if inf_c: inf_c.start()
 
-        cap_a = open_cap(self.cam_a_idx)
-        cap_b = open_cap(self.cam_b_idx) if self.cam_b_idx is not None else None
-        cap_c = open_cap(self.cam_c_idx) if self.cam_c_idx is not None else None
+        cap_a = open_cap(self.cam_a_idx, self.fps_a)
+        cap_b = open_cap(self.cam_b_idx, self.fps_b) if self.cam_b_idx is not None else None
+        cap_c = open_cap(self.cam_c_idx, self.fps_c) if self.cam_c_idx is not None else None
 
         last_a = last_b = last_c = None; fc = 0
         ts_a = ts_b = ts_c = 0.0   # timestamps de captura por cámara
@@ -1523,10 +1532,15 @@ class FighterIDApp(ctk.CTk):
         cam_b = self._cameras[1]['index'] if len(self._cameras) >= 2 else None
         cam_c = self._cameras[2]['index'] if len(self._cameras) >= 3 else None
 
+        fps_a = self._cameras[0]['fps'] if self._cameras else CAM_FPS
+        fps_b = self._cameras[1]['fps'] if len(self._cameras) >= 2 else CAM_FPS
+        fps_c = self._cameras[2]['fps'] if len(self._cameras) >= 3 else CAM_FPS
+
         labels = "  |  ".join(c['label'] for c in self._cameras)
         self._top_status.configure(text=labels, text_color=GUI_GREEN)
 
-        self._engine = VisionEngine(cam_a, cam_b, cam_c, DEFAULT_BASELINE)
+        self._engine = VisionEngine(cam_a, cam_b, cam_c, DEFAULT_BASELINE,
+                                    fps_a=fps_a, fps_b=fps_b, fps_c=fps_c)
         self._engine.start()
         self._running = True
         self.after(33, self._update_gui)
