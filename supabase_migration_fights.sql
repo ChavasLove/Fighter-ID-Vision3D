@@ -14,7 +14,7 @@
 
 -- ------------------------------------------------------------
 --  TABLE: fights
---  Una fila por pelea. Creada por el motor vía vision_sync.py.
+--  Una fila por pelea. Creada por el motor vía fight_manager.py.
 --  Arquitectura: MOTOR escribe → WEB lee.
 -- ------------------------------------------------------------
 create table if not exists public.fights (
@@ -27,6 +27,9 @@ create table if not exists public.fights (
     -- Peleadores — deben existir en fighter_profiles.
     fighter_a_id uuid        not null references public.fighter_profiles(id),
     fighter_b_id uuid        not null references public.fighter_profiles(id),
+
+    -- Número de pelea dentro del evento (ej: pelea 1 de 5).
+    fight_number int         not null default 1,
 
     -- Estado del ciclo de vida de la pelea.
     --   pending     → creada, esperando inicio
