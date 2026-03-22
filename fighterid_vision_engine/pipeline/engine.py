@@ -2,10 +2,11 @@
 FighterID Vision Engine — Motor principal (VisionMotorV1 + FighterIDAPI)
 
 Contrato:
-  - fight_id viene SIEMPRE de la API web (--fight-id o FIGHT_ID env var)
+  - fight_id es OPCIONAL al arrancar — se puede pasar por CLI/env o autodescubrir
   - session_id, fight_id y fighter UUIDs vienen de POST /start
   - El motor NUNCA genera UUIDs localmente
   - Camera mapping explícito logueado al arrancar para diagnóstico
+  - Visión siempre arranca; backend se conecta de forma asíncrona
 
 Extraído y modularizado desde vision_motor_v1.py.
 """
@@ -216,14 +217,13 @@ class VisionMotorV1:
     Motor de visión V1 estable.
 
     Flujo:
-      1. Recibe fight_id de CLI / env (nunca generado localmente)
-      2. start_session(fight_id) → session_id + fighter UUIDs desde la web
-      3. Abre cámaras con camera_map explícito
-      4. Bucle: detecta pose → asigna esquinas → detecta golpe → POST /event
-      5. Graba video con fight_id como nombre de archivo
+      1. Abre cámaras SIEMPRE, independientemente del backend
+      2. Lanza hilo de sincronización que descubre/conecta fight_id en background
+      3. Bucle: detecta pose → asigna esquinas → detecta golpe → POST /event
+      4. Graba video con fight_id como nombre de archivo (cuando fight_id disponible)
     """
 
-    def __init__(self, fight_id: str,
+    def __init__(self, fight_id: "str | None" = None,
                  cam_a: int = 0, cam_b: int = 1, cam_c: int = 2,
                  show: bool = False):
         self.camera_map = {"A": cam_a, "B": cam_b, "C": cam_c}
@@ -240,9 +240,23 @@ class VisionMotorV1:
         self._running  = False
 
     def start(self) -> None:
-        print(f"[MOTOR] Iniciando sesión → fight_id={self._fight_id}")
-        self.api.start_session(self._fight_id)
+        # 1. Abrir cámaras SIEMPRE — visión no depende del backend
+        self._start_cameras()
 
+        # 2. Hilo de sincronización con backend (no bloquea)
+        threading.Thread(
+            target=self._session_sync_loop,
+            daemon=True,
+            name="FighterIDSessionSync",
+        ).start()
+
+        # 3. Arrancar bucle principal
+        self._running = True
+        print("[MOTOR] Bucle de detección iniciado — Ctrl+C para detener")
+        self._loop()
+
+    def _start_cameras(self) -> None:
+        """Abre todos los streams de cámara. Lanza RuntimeError si cámara A no disponible."""
         for role, idx in self.camera_map.items():
             if idx is not None:
                 stream = CameraStream(idx).start()
@@ -251,12 +265,36 @@ class VisionMotorV1:
 
         if "A" not in self._streams or not self._streams["A"].is_open():
             raise RuntimeError("[MOTOR] Cámara A no disponible — abortando")
+        print("[MOTOR] Cámaras listas")
 
-        self.recorder = VideoRecorder(self.api.fight_id, round_num=1)
-        self._running = True
+    def _session_sync_loop(self) -> None:
+        """
+        Hilo daemon: descubre fight_id y conecta sesión con el backend.
+        Se ejecuta cada 2 segundos hasta que la sesión esté activa.
+        """
+        # Si ya tenemos fight_id desde CLI/env, conectar de inmediato
+        if self._fight_id and not self.api.fight_id:
+            print(f"[SYNC] Conectando sesión → fight_id={self._fight_id}")
+            try:
+                self.api.start_session(self._fight_id)
+                if self.recorder is None:
+                    self.recorder = VideoRecorder(self.api.fight_id, round_num=1)
+            except Exception as e:
+                print(f"[SYNC] Error iniciando sesión: {e}")
 
-        print("[MOTOR] Bucle de detección iniciado — Ctrl+C para detener")
-        self._loop()
+        while self._running:
+            if not self.api.fight_id:
+                fight_id = discover_fight_id()
+                if fight_id:
+                    print(f"[SYNC] fight_id encontrado: {fight_id}")
+                    self._fight_id = fight_id
+                    try:
+                        self.api.start_session(fight_id)
+                        if self.recorder is None:
+                            self.recorder = VideoRecorder(self.api.fight_id, round_num=1)
+                    except Exception as e:
+                        print(f"[SYNC] Error iniciando sesión: {e}")
+            time.sleep(2)
 
     def _loop(self) -> None:
         fps_frames       = 0
@@ -272,7 +310,8 @@ class VisionMotorV1:
             persons = self.detector.infer(frame)
             roles   = self.tracker.assign(persons)
 
-            self.recorder.write(frame)
+            if self.recorder is not None:
+                self.recorder.write(frame)
 
             for corner in ("red", "blue"):
                 person   = roles.get(corner)
@@ -320,6 +359,10 @@ class VisionMotorV1:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         cv2.putText(disp, f"personas={n_persons}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        status = "CONNECTED" if self.api.fight_id else "NO SESSION"
+        color  = (0, 255, 0) if self.api.fight_id else (0, 0, 255)
+        cv2.putText(disp, status, (20, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
         return disp
 
     def stop(self) -> None:

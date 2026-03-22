@@ -3,19 +3,23 @@ FighterID Vision Motor — entry point headless
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Uso:
-  python main.py --fight-id <uuid-de-la-web>
+  python main.py                              # sin sesión — visión arranca igual
+  python main.py --fight-id <uuid-de-la-web>  # conecta sesión de inmediato
   python main.py --fight-id <uuid> --cam-a 0 --cam-b 1 --cam-c 2
   FIGHT_ID=<uuid> python main.py
 
 Contrato:
-  - fight_id viene SIEMPRE de la web (fighter-id.org) — el motor NUNCA lo inventa
+  - fight_id es OPCIONAL — si no se pasa, el motor autodescubre la sesión activa
   - Las credenciales se leen de .env (ver .env.example)
   - Para la interfaz gráfica: usa main_gui.py
+  - Visión siempre arranca; backend se conecta de forma asíncrona
 
 Checklist de arranque:
   [GPU]      torch-directml → AMD GPU  (o CUDA/CPU)
   [CAM MAP]  {'A': 0, 'B': 1, 'C': 2}
   [ONNX]     Cargado — providers=[DmlExecutionProvider]
+  [MOTOR]    Cámaras listas
+  [SYNC]     fight_id encontrado: <uuid>   ← cuando hay sesión activa
   [SYNC OK]  fight=<uuid>  session=<uuid>
   [FIGHTERS] red=<uuid>  blue=<uuid>
   [MOTOR]    Bucle de detección iniciado — Ctrl+C para detener
@@ -62,24 +66,14 @@ def main() -> None:
 
     fight_id = args.fight_id or os.environ.get("FIGHT_ID")
 
-    if not fight_id:
-        print("[MOTOR] Buscando sesión activa en Supabase...")
-        from fighterid_vision_engine.pipeline.engine import discover_fight_id
-        fight_id = discover_fight_id()
-
-    if not fight_id:
-        print("[ERROR] No hay sesión activa en Supabase.")
-        print("        Crea una sesión desde la web (fighter-id.org) primero.")
-        print()
-        print("  Override manual:  python main.py --fight-id <uuid>")
-        sys.exit(1)
-
-    if args.fight_id:
-        print(f"[SOURCE] fight_id desde CLI: {fight_id}")
-    elif os.environ.get("FIGHT_ID"):
-        print(f"[SOURCE] fight_id desde ENV: {fight_id}")
+    if fight_id:
+        if args.fight_id:
+            print(f"[SOURCE] fight_id desde CLI: {fight_id}")
+        else:
+            print(f"[SOURCE] fight_id desde ENV: {fight_id}")
     else:
-        print(f"[SOURCE] fight_id desde AUTO-DISCOVERY: {fight_id}")
+        print("[MOTOR] Sin fight_id — arrancando en modo visión, "
+              "sesión se conectará automáticamente cuando esté disponible")
 
     motor = VisionMotorV1(
         fight_id=fight_id,
