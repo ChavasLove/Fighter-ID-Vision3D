@@ -135,9 +135,9 @@ class FighterIDAPI:
         resp = requests.post(
             f"{self.base_url}/start",
             json={
-                "fight_id":  fight_id,
-                "device_id": DEVICE_ID,
-                "cameras":   [0, 1, 2],
+                "fight_id":      fight_id,
+                "device_id":     DEVICE_ID,
+                "model_version": "v1.0",
             },
             headers=self._headers(),
             timeout=10,
@@ -186,17 +186,33 @@ class FighterIDAPI:
         """Detiene el loop de heartbeat — llamado desde VisionMotorV1.stop()."""
         self._hb_running = False
 
-    def send_event(self, fighter_id: str, confidence: float) -> None:
+    def stop_session(self) -> None:
+        """POST /stop — notifica al backend que la sesión terminó."""
+        if not self.fight_id or not API_ENABLED:
+            return
+        try:
+            r = requests.post(
+                f"{self.base_url}/stop",
+                json={
+                    "fight_id":  self.fight_id,
+                    "device_id": DEVICE_ID,
+                },
+                headers=self._headers(),
+                timeout=5,
+            )
+            print(f"[STOP] Session ended → status={r.status_code}")
+        except Exception as e:
+            print(f"[STOP] Error: {e}")
+
+    def send_event(self, corner: str, strike_type: str, confidence: float) -> None:
         """POST /event — fire-and-forget en hilo daemon."""
         if not self.fight_id or not API_ENABLED:
             return
         payload = {
-            "session_id": self.session_id,
-            "fight_id":   self.fight_id,
-            "fighter_id": fighter_id,
-            "type":       "strike",
-            "confidence": round(confidence, 3),
-            "timestamp":  time.time(),
+            "fight_id":    self.fight_id,
+            "corner":      corner,
+            "strike_type": strike_type,
+            "confidence":  round(confidence, 3),
         }
         threading.Thread(
             target=self._post_event,
@@ -212,7 +228,7 @@ class FighterIDAPI:
                 headers=self._headers(),
                 timeout=5,
             )
-            print(f"[EVENT] OK → status={r.status_code}  fighter={payload.get('fighter_id')}")
+            print(f"[EVENT] OK → status={r.status_code}  corner={payload.get('corner')}  type={payload.get('strike_type')}")
         except Exception as e:
             print(f"[EVENT] Error enviando: {e}")
 
@@ -467,7 +483,7 @@ class VisionMotorV1:
                 print(f"[EVENT] fighter={fighter_id}  corner={corner}"
                       f"  speed={avg_speed:.2f}m/s  conf={avg_conf:.2f}"
                       f"  type={punch_type}")
-                self.api.send_event(fighter_id, avg_conf)
+                self.api.send_event(corner, punch_type, avg_conf)
 
                 # V5 PRO: heatmap — posición del oponente como zona de impacto
                 impact_person = opponent if opponent is not None else person
@@ -604,6 +620,7 @@ class VisionMotorV1:
         return disp
 
     def stop(self) -> None:
+        self.api.stop_session()     # POST /stop antes de cerrar el heartbeat
         self.api.stop_heartbeat()
         self._running = False
         if self._show:
