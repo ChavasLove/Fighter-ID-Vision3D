@@ -190,23 +190,28 @@ class PoseDetector:
             data = data.T  # → [N, 56]
 
         raw_count = len(data)
+        # Filtrado vectorizado: descarta los ~8400 candidatos con baja confianza
+        # antes de entrar al loop Python (típicamente quedan 1-3 personas)
+        confs    = data[:, 4]
+        mask     = confs >= self.CONF_THR
+        filtered = data[mask]
+
+        if not len(filtered):
+            if raw_count > 0:
+                print(f"[ONNX] {raw_count} candidatos descartados "
+                      f"(conf_max={float(confs.max()):.3f} < thr={self.CONF_THR}) "
+                      f"— prueba bajar POSE_CONF_THR en .env")
+            return []
+
         persons = []
-        for det in data:
+        for det in filtered:
             conf = float(det[4])
-            if conf < self.CONF_THR:
-                continue
             cx, cy, w, h = det[0]*sx, det[1]*sy, det[2]*sx, det[3]*sy
             x1, y1, x2, y2 = cx - w/2, cy - h/2, cx + w/2, cy + h/2
             kps_raw       = det[5:].reshape(17, 3).copy()
             kps_raw[:, 0] *= sx
             kps_raw[:, 1] *= sy
             persons.append({"keypoints": kps_raw, "bbox": [x1, y1, x2, y2], "conf": conf})
-
-        if not persons and raw_count > 0:
-            max_conf = max(float(d[4]) for d in data)
-            print(f"[ONNX] {raw_count} candidatos descartados "
-                  f"(conf_max={max_conf:.3f} < thr={self.CONF_THR}) "
-                  f"— prueba bajar POSE_CONF_THR en .env")
         return persons
 
     def _infer_yolo(self, frame: np.ndarray) -> list:

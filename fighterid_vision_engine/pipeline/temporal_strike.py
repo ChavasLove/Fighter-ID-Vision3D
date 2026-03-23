@@ -52,12 +52,17 @@ class _WristBuffer:
         """Agrega posición (x, y) en píxeles + timestamp."""
         self._buf.append((pos.copy(), ts))
 
-    def velocities(self) -> list[float]:
+    def snapshot(self) -> list:
+        """Copia única del buffer — pasar a velocities/avg_dt/trajectory_vector
+        para evitar múltiples conversiones deque→list por frame."""
+        return list(self._buf)
+
+    def velocities(self, snap: list | None = None) -> list[float]:
         """
         Lista de velocidades en m/s entre frames consecutivos.
         Retorna lista vacía si hay < 2 muestras.
         """
-        buf = list(self._buf)
+        buf = snap if snap is not None else list(self._buf)
         vels = []
         for i in range(1, len(buf)):
             pos1, t1 = buf[i - 1]
@@ -74,20 +79,20 @@ class _WristBuffer:
             return []
         return [(vels[i] - vels[i - 1]) / dt_avg for i in range(1, len(vels))]
 
-    def avg_dt(self) -> float:
+    def avg_dt(self, snap: list | None = None) -> float:
         """Intervalo promedio entre frames del buffer."""
-        buf = list(self._buf)
+        buf = snap if snap is not None else list(self._buf)
         if len(buf) < 2:
             return 1.0 / 30.0  # default 30 fps
         dts = [buf[i][1] - buf[i - 1][1] for i in range(1, len(buf))]
         return float(np.mean(dts))
 
-    def trajectory_vector(self) -> np.ndarray:
+    def trajectory_vector(self, snap: list | None = None) -> np.ndarray:
         """
         Vector de trayectoria del primer al último punto del buffer.
         Útil para clasificación de golpe.
         """
-        buf = list(self._buf)
+        buf = snap if snap is not None else list(self._buf)
         if len(buf) < 2:
             return np.zeros(2)
         return buf[-1][0] - buf[0][0]
@@ -231,8 +236,9 @@ class TemporalStrikeAnalyzer:
                 # Fallback single-frame para warm-up del buffer
                 continue
 
-            vels   = buf.velocities()
-            dt_avg = buf.avg_dt()
+            snap   = buf.snapshot()
+            vels   = buf.velocities(snap)
+            dt_avg = buf.avg_dt(snap)
             accels = buf.accelerations(vels, dt_avg)
 
             is_punch, peak_vel = _detect_punch_signature(vels, accels)
@@ -268,8 +274,8 @@ class TemporalStrikeAnalyzer:
             is_hit = False
 
         # ── Clasificar golpe ─────────────────────────────────────────────
-        buf = rw_buf if active_wrist == "right" else lw_buf
-        traj = buf.trajectory_vector()
+        buf  = rw_buf if active_wrist == "right" else lw_buf
+        traj = buf.trajectory_vector(buf.snapshot())
         punch_type = _classify_punch(traj, active_wrist, kps)
 
         _fs.record_strike(corner.upper(), speed, is_hit=is_hit)

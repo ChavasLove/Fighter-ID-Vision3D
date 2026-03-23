@@ -28,10 +28,13 @@ class HeatmapEngine:
 
     def __init__(self, height: int = 720, width: int = 1280,
                  blur_radius: int = 30):
-        self._map   = np.zeros((height, width), dtype=np.float32)
-        self._lock  = threading.Lock()
+        self._map            = np.zeros((height, width), dtype=np.float32)
+        self._lock           = threading.Lock()
         # El kernel de GaussianBlur debe ser impar
-        self._blur  = blur_radius if blur_radius % 2 == 1 else blur_radius + 1
+        self._blur           = blur_radius if blur_radius % 2 == 1 else blur_radius + 1
+        # Cache del overlay renderizado; se recalcula solo cuando _dirty=True
+        self._dirty          = False
+        self._cached_overlay: np.ndarray | None = None
 
     def add_point(self, x: int, y: int, intensity: float = 1.0) -> None:
         """
@@ -44,30 +47,39 @@ class HeatmapEngine:
             return
         with self._lock:
             self._map[y, x] += intensity
+            self._dirty = True
 
     def render(self, frame: np.ndarray, alpha: float = 0.35) -> np.ndarray:
         """
         Retorna frame + overlay térmico blended.
         No modifica el frame original; retorna una copia blended.
         Si no hay datos en el mapa, retorna frame sin modificar.
+        El GaussianBlur solo se recalcula cuando se añade un nuevo punto (_dirty).
         """
         with self._lock:
             if self._map.max() == 0:
                 return frame
-            snap = self._map.copy()
+            if self._dirty:
+                snap = self._map.copy()
+                self._dirty = False
+            else:
+                snap = None
 
-        blurred    = cv2.GaussianBlur(snap, (self._blur, self._blur), 0)
-        normalized = cv2.normalize(blurred, None, 0, 255, cv2.NORM_MINMAX)
-        colored    = cv2.applyColorMap(normalized.astype(np.uint8),
-                                       cv2.COLORMAP_JET)
+        if snap is not None:
+            blurred    = cv2.GaussianBlur(snap, (self._blur, self._blur), 0)
+            normalized = cv2.normalize(blurred, None, 0, 255, cv2.NORM_MINMAX)
+            colored    = cv2.applyColorMap(normalized.astype(np.uint8),
+                                           cv2.COLORMAP_JET)
+            mask = (normalized > 10).astype(np.uint8)
+            self._cached_overlay = cv2.bitwise_and(colored, colored, mask=mask)
 
-        # Mostrar solo zonas con datos reales (evita ruido en áreas vacías)
-        mask    = (normalized > 10).astype(np.uint8)
-        colored = cv2.bitwise_and(colored, colored, mask=mask)
-
-        return cv2.addWeighted(frame, 1.0 - alpha, colored, alpha, 0)
+        if self._cached_overlay is None:
+            return frame
+        return cv2.addWeighted(frame, 1.0 - alpha, self._cached_overlay, alpha, 0)
 
     def reset(self) -> None:
         """Reinicia el mapa — llamar al inicio de cada nueva sesión."""
         with self._lock:
             self._map[:] = 0
+            self._dirty = False
+            self._cached_overlay = None
