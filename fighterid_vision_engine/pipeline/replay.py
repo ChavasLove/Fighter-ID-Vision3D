@@ -33,7 +33,9 @@ class ReplayEngine:
     WINDOW = "FighterID REPLAY"
 
     def __init__(self, buffer_size: int = 120, playback_fps: int = 15):
-        self._buffer      = deque(maxlen=buffer_size)
+        # Guardar cada 2 frames a mitad de resolución: ~8× menos memoria que full-res
+        self._buffer      = deque(maxlen=buffer_size // 2)
+        self._fc          = 0        # contador para skip de frames
         self._replay      = []       # snapshot congelado del buffer
         self._idx         = 0
         self._playing     = False
@@ -45,10 +47,16 @@ class ReplayEngine:
     def add_frame(self, frame: np.ndarray) -> None:
         """
         Añade frame al buffer circular. Thread-safe.
+        Guarda 1 de cada 2 frames a mitad de resolución para reducir memoria.
         Llamar en cada iteración del loop de detección.
         """
+        self._fc += 1
+        if self._fc % 2 != 0:
+            return
+        h, w = frame.shape[:2]
+        small = cv2.resize(frame, (w // 2, h // 2), interpolation=cv2.INTER_LINEAR)
         with self._lock:
-            self._buffer.append(frame.copy())
+            self._buffer.append(small)
 
     def trigger(self) -> None:
         """

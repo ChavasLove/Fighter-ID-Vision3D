@@ -175,8 +175,8 @@ def detect_cameras():
             time.sleep(0.25)
 
     # Sin agrupamiento — cada índice OpenCV = 1 cámara
-    # Ordenar por FPS descendente para poner las más fluidas primero
-    raw.sort(key=lambda c: (c['fps'], c['w'] * c['h']), reverse=True)
+    # Ordenar por índice para mantener asignación consistente (cam A = idx más bajo)
+    raw.sort(key=lambda c: c['index'])
     result = raw[:3]
 
     print(f"\n  Seleccionadas: {len(result)}/3")
@@ -372,6 +372,40 @@ class InferThread(threading.Thread):
                         print(f"[{self.name}] → fallback a CPU")
                     except Exception:
                         pass
+
+class CaptureThread(threading.Thread):
+    """
+    Lee frames de una cámara de forma continua en su propio hilo.
+    read() devuelve el último frame sin bloquear el loop principal.
+    """
+    def __init__(self, cap, name="Cap"):
+        super().__init__(daemon=True, name=name)
+        self._cap   = cap
+        self._frame = None
+        self._ts    = 0.0
+        self._lock  = threading.Lock()
+        self._go    = True
+
+    def read(self):
+        with self._lock:
+            return self._frame, self._ts
+
+    def stop(self):
+        self._go = False
+
+    def run(self):
+        while self._go:
+            if not self._cap.isOpened():
+                time.sleep(0.01)
+                continue
+            ret, frame = self._cap.read()
+            if ret and frame is not None:
+                with self._lock:
+                    self._frame = frame
+                    self._ts    = time.time()
+            else:
+                time.sleep(0.005)
+
 
 # ══════════════════════════════════════════════════════════════════
 #  HELPERS
@@ -801,6 +835,7 @@ class VisionEngine(threading.Thread):
     def run(self):
         def open_cap(idx, fps=CAM_FPS):
             c = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+            c.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
             c.set(cv2.CAP_PROP_FRAME_WIDTH,  CAM_W)
             c.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
             c.set(cv2.CAP_PROP_FPS, fps)
@@ -852,8 +887,13 @@ class VisionEngine(threading.Thread):
         if inf_c: inf_c.start()
 
         cap_a = open_cap(self.cam_a_idx, self.fps_a)
+        thr_a = CaptureThread(cap_a, "CapA"); thr_a.start()
         cap_b = open_cap(self.cam_b_idx, self.fps_b) if self.cam_b_idx is not None else None
+        thr_b = CaptureThread(cap_b, "CapB") if cap_b is not None else None
+        if thr_b: thr_b.start()
         cap_c = open_cap(self.cam_c_idx, self.fps_c) if self.cam_c_idx is not None else None
+        thr_c = CaptureThread(cap_c, "CapC") if cap_c is not None else None
+        if thr_c: thr_c.start()
 
         last_a = last_b = last_c = None; fc = 0
         ts_a = ts_b = ts_c = 0.0   # timestamps de captura por cámara
@@ -862,20 +902,20 @@ class VisionEngine(threading.Thread):
         self._log("Sistema listo ✓")
 
         while self._go:
-            ret_a, frame_a = cap_a.read(); ts_a = time.time()
-            if not ret_a: time.sleep(0.01); continue
+            frame_a, ts_a = thr_a.read()
+            if frame_a is None: time.sleep(0.005); continue
             frame_a = cv2.flip(frame_a, 1)
 
             frame_b = frame_c = None
-            if cap_b:
-                ret_b, frame_b = cap_b.read(); ts_b = time.time()
-                if ret_b: frame_b = cv2.flip(frame_b, 1)
+            if thr_b:
+                frame_b, ts_b = thr_b.read()
+                if frame_b is not None: frame_b = cv2.flip(frame_b, 1)
                 else: ts_b = ts_a
             else:
                 ts_b = ts_a
-            if cap_c:
-                ret_c, frame_c = cap_c.read(); ts_c = time.time()
-                if ret_c: frame_c = cv2.flip(frame_c, 1)
+            if thr_c:
+                frame_c, ts_c = thr_c.read()
+                if frame_c is not None: frame_c = cv2.flip(frame_c, 1)
                 else: ts_c = ts_a
             else:
                 ts_c = ts_a
@@ -1153,6 +1193,9 @@ class VisionEngine(threading.Thread):
         inf_a.stop()
         if inf_b: inf_b.stop()
         if inf_c: inf_c.stop()
+        thr_a.stop()
+        if thr_b: thr_b.stop()
+        if thr_c: thr_c.stop()
         cap_a.release()
         if cap_b: cap_b.release()
         if cap_c: cap_c.release()

@@ -360,10 +360,10 @@ class FighterIDAPI:
         try:
             res = (db.table("fights")
                      .select("id, status, "
-                             "fighter_red:fighter_profiles!fighter_red_id"
-                             "(id, name, full_name, nickname, record, weight_class, gym_id), "
-                             "fighter_blue:fighter_profiles!fighter_blue_id"
-                             "(id, name, full_name, nickname, record, weight_class, gym_id)")
+                             "fighter_red:fighter_profiles!fighter_a_id"
+                             "(id, name, full_name, nickname, record, weight_class, gym), "
+                             "fighter_blue:fighter_profiles!fighter_b_id"
+                             "(id, name, full_name, nickname, record, weight_class, gym)")
                      .eq("id", fight_id)
                      .limit(1)
                      .execute())
