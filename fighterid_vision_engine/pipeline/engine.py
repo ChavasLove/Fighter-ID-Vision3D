@@ -13,6 +13,7 @@ Extraído y modularizado desde vision_motor_v1.py.
 
 import threading
 import time
+import uuid
 
 import cv2
 import numpy as np
@@ -26,6 +27,8 @@ from fighterid_vision_engine.pipeline.recorder import VideoRecorder
 from fighterid_vision_engine.config.settings import (
     FIGHTERID_API_URL,
     FIGHTERID_API_KEY,
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY,
     DEVICE_ID,
     API_ENABLED,
     STATS_INTERVAL_S,
@@ -34,10 +37,19 @@ from fighterid_vision_engine.config.settings import (
     REPLAY_SPEED_THRESHOLD, REPLAY_BUFFER_FRAMES,
     HIT_EFFECT_FRAMES, HEATMAP_BLUR_RADIUS,
     MULTICAM_CONFIRM_MS,
+    MODEL_VERSION,
+    RULES_VERSION,
 )
 from fighterid_vision_engine.pipeline.heatmap import HeatmapEngine
 from fighterid_vision_engine.pipeline.replay  import ReplayEngine
 from fighterid_vision_engine.pipeline import fighters_state as _fs
+
+# ── Nuevos subsistemas del motor de eventos ────────────────────────────
+from fighterid_vision_engine.events.factory    import CombatEventFactory
+from fighterid_vision_engine.features.flags    import FeatureFlags
+from fighterid_vision_engine.scoring.rules_engine import BoxingRulesEngine
+from fighterid_vision_engine.sync.event_producer  import EventProducer
+from fighterid_vision_engine.observability.logger import StructuredLogger
 
 
 def discover_fight_id() -> "str | None":
@@ -351,37 +363,56 @@ class VisionMotorV1:
         self.camera_map = {"A": cam_a, "B": cam_b, "C": cam_c}
         print(f"[CAM MAP] {self.camera_map}")
 
-        self._fight_id = fight_id
-        self._show     = show
-        self.api       = FighterIDAPI()
-        self.detector  = PoseDetector()
-        self.tracker   = PersistentTracker()
-        self.strikes   = TemporalStrikeAnalyzer()
+        self._fight_id    = fight_id
+        self._show        = show
+        self._current_round = 1
+        self.api          = FighterIDAPI()
+        self.detector     = PoseDetector()
+        self.tracker      = PersistentTracker()
+        self.strikes      = TemporalStrikeAnalyzer()
         # Validador multi-cámara: en modo headless solo 1 cámara activa,
         # min_cameras=1 para no bloquear confirmaciones.
-        self.multicam  = MultiCamStrikeValidator(min_cameras=1)
-        self.recorder  = None
+        self.multicam     = MultiCamStrikeValidator(min_cameras=1)
+        self.recorder     = None
         self._streams: dict = {}
-        self._running  = False
+        self._running     = False
 
         # V5 PRO visual engines
-        self.heatmap   = HeatmapEngine(height=CAM_H, width=CAM_W,
-                                        blur_radius=HEATMAP_BLUR_RADIUS)
-        self.replay    = ReplayEngine(buffer_size=REPLAY_BUFFER_FRAMES, playback_fps=15)
+        self.heatmap      = HeatmapEngine(height=CAM_H, width=CAM_W,
+                                          blur_radius=HEATMAP_BLUR_RADIUS)
+        self.replay       = ReplayEngine(buffer_size=REPLAY_BUFFER_FRAMES, playback_fps=15)
         self._effects: list = []   # efectos transitorios activos (HIT! + XP)
+
+        # ── Motor de eventos (nuevo sistema de scoring formal) ─────────
+        self.feature_flags   = FeatureFlags()
+        self.rules_engine    = BoxingRulesEngine()
+        self._event_logger   = StructuredLogger(
+            model="YOLOv8n-pose", model_version=MODEL_VERSION,
+        )
+        self.event_producer  = EventProducer(
+            supabase_url=  SUPABASE_URL,
+            api_key=       SUPABASE_ANON_KEY,
+            model_version= MODEL_VERSION,
+            logger=        self._event_logger,
+            feature_flags= self.feature_flags,
+        )
+        print(f"[MOTOR] {self.feature_flags}")
 
     def start(self) -> None:
         # 1. Abrir cámaras SIEMPRE — visión no depende del backend
         self._start_cameras()
 
-        # 2. Hilo de sincronización con backend (no bloquea)
+        # 2. Arrancar el productor de eventos (hilo worker + buffer de reintentos)
+        self.event_producer.start()
+
+        # 3. Hilo de sincronización con backend (no bloquea)
         threading.Thread(
             target=self._session_sync_loop,
             daemon=True,
             name="FighterIDSessionSync",
         ).start()
 
-        # 3. Hilo de push de métricas al dashboard
+        # 4. Hilo de push de métricas al dashboard
         self._running = True
         threading.Thread(
             target=self._stats_push_loop,
@@ -389,7 +420,7 @@ class VisionMotorV1:
             name="FighterIDStatsPush",
         ).start()
 
-        # 4. Arrancar bucle principal
+        # 5. Arrancar bucle principal
         print("[MOTOR] Bucle de detección iniciado — Ctrl+C para detener")
         self._loop()
 
@@ -419,6 +450,10 @@ class VisionMotorV1:
                 self.heatmap.reset()
                 if self.recorder is None:
                     self.recorder = VideoRecorder(self.api.fight_id, round_num=1)
+                # Registrar fight como activo en el productor de eventos
+                self.event_producer.register_active_fight(self.api.fight_id)
+                # Emitir round_start del round inicial
+                self._emit_round_start(self._current_round)
             except Exception as e:
                 print(f"[SYNC] Error iniciando sesión: {e}")
 
@@ -434,6 +469,10 @@ class VisionMotorV1:
                         self.heatmap.reset()
                         if self.recorder is None:
                             self.recorder = VideoRecorder(self.api.fight_id, round_num=1)
+                        # Registrar fight como activo en el productor de eventos
+                        self.event_producer.register_active_fight(self.api.fight_id)
+                        # Emitir round_start del round inicial
+                        self._emit_round_start(self._current_round)
                     except Exception as e:
                         print(f"[SYNC] Error iniciando sesión: {e}")
             time.sleep(2)
@@ -484,6 +523,15 @@ class VisionMotorV1:
                       f"  speed={avg_speed:.2f}m/s  conf={avg_conf:.2f}"
                       f"  type={punch_type}")
                 self.api.send_event(corner, punch_type, avg_conf)
+
+                # ── Motor de eventos: emitir CombatEvent formal ────────
+                if self.api.fight_id and self.feature_flags.EMIT_SCORING_EVENTS:
+                    self._emit_hit(
+                        corner=      corner,
+                        punch_type=  punch_type or "unknown",
+                        confidence=  avg_conf,
+                        impact_score=avg_speed,
+                    )
 
                 # V5 PRO: heatmap — posición del oponente como zona de impacto
                 impact_person = opponent if opponent is not None else person
@@ -619,10 +667,101 @@ class VisionMotorV1:
 
         return disp
 
+    # ── Helpers para emisión de eventos formales ──────────────────────
+
+    def _emit_hit(
+        self,
+        corner:       str,
+        punch_type:   str,
+        confidence:   float,
+        impact_score: float,
+        target:       str = "head",
+    ) -> None:
+        """Emite un CombatEvent de tipo hit_detected de forma no-bloqueante."""
+        if not self.api.fight_id:
+            return
+        t_start = time.monotonic()
+        trace_id = str(uuid.uuid4())
+        event = CombatEventFactory.hit_detected(
+            fight_id=      self.api.fight_id,
+            corner=        corner,
+            confidence=    round(confidence, 4),
+            hit_type=      punch_type if punch_type in (
+                               "jab", "cross", "hook", "uppercut") else "unknown",
+            target=        target,
+            impact_score=  round(impact_score, 4),
+            round_num=     self._current_round,
+            model_version= MODEL_VERSION,
+            rules_version= RULES_VERSION,
+            trace_id=      trace_id,
+            latency_ms=    (time.monotonic() - t_start) * 1000,
+        )
+        # Aplicar reglas de boxeo antes de emitir
+        if self.feature_flags.NEW_SCORING_ENGINE:
+            result = self.rules_engine.process_event(event)
+            if not result.accepted:
+                return   # Filtrado por el motor de reglas (dedup, baja confianza, etc.)
+        self.event_producer.emit(event)
+
+    def _emit_knockdown(self, corner: str, confidence: float = 1.0) -> None:
+        """Emite un CombatEvent de tipo knockdown."""
+        if not self.api.fight_id:
+            return
+        event = CombatEventFactory.knockdown(
+            fight_id=      self.api.fight_id,
+            corner=        corner,
+            confidence=    confidence,
+            round_num=     self._current_round,
+            model_version= MODEL_VERSION,
+            rules_version= RULES_VERSION,
+        )
+        self.event_producer.emit(event)
+
+    def _emit_round_start(self, round_num: int) -> None:
+        """Emite un CombatEvent de tipo round_start."""
+        if not self.api.fight_id:
+            return
+        event = CombatEventFactory.round_start(
+            fight_id=      self.api.fight_id,
+            round_num=     round_num,
+            model_version= MODEL_VERSION,
+            rules_version= RULES_VERSION,
+        )
+        self.event_producer.emit(event)
+
+    def _emit_round_end(self, round_num: int) -> None:
+        """Emite un CombatEvent de tipo round_end."""
+        if not self.api.fight_id:
+            return
+        event = CombatEventFactory.round_end(
+            fight_id=      self.api.fight_id,
+            round_num=     round_num,
+            model_version= MODEL_VERSION,
+            rules_version= RULES_VERSION,
+        )
+        self.event_producer.emit(event)
+        # Limpiar estado de dedup al cambiar de round
+        self.rules_engine.reset_dedup_state()
+
+    def advance_round(self, new_round: int) -> None:
+        """
+        Avanza al siguiente round.
+
+        Emite round_end del round actual y round_start del nuevo.
+        Llamar desde la GUI o desde un controlador externo.
+        """
+        self._emit_round_end(self._current_round)
+        self._current_round = new_round
+        self._emit_round_start(self._current_round)
+
     def stop(self) -> None:
+        self._emit_round_end(self._current_round)
         self.api.stop_session()     # POST /stop antes de cerrar el heartbeat
         self.api.stop_heartbeat()
         self._running = False
+        self.event_producer.stop(timeout=5.0)
+        if self._fight_id:
+            self.event_producer.unregister_fight(self._fight_id)
         if self._show:
             cv2.destroyAllWindows()
         if self.recorder:

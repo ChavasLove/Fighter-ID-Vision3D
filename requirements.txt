@@ -34,3 +34,9 @@ pillow>=10.0.0
 # GPU DirectML — Intel/AMD/NVIDIA en Windows (DirectX 12)
 torch-directml>=0.2.0
 
+# Testing
+pytest>=7.0.0
+
+# JSON schema validation
+jsonschema>=4.0.0
+
