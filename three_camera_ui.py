@@ -264,12 +264,13 @@ else:
 
 class StereoFuser:
     def __init__(self, baseline_m=DEFAULT_BASELINE, focal_px=FOCAL_EST, cx=CX, cy=CY,
-                 calib=None):
+                 calib=None, cam_dist_m=2.0):
         self.B    = max(0.05, baseline_m)
         self.f    = focal_px
         self.cx   = cx
         self.cy   = cy
         self.calib = calib  # dict con P1, P2 (matrices de proyección 3×4)
+        self.cam_dist_m = max(0.50, cam_dist_m)  # distancia cámara → ring (fallback single-cam)
 
     def triangulate(self, u_a, v_a, u_b, v_b):
         """
@@ -305,7 +306,8 @@ class StereoFuser:
         Y = Z * (float(v_a) - self.cy) / self.f
         return (X, Y, Z)
 
-    def depth_from_single(self, u, v, z=2.0):
+    def depth_from_single(self, u, v, z=None):
+        z = z if z is not None else self.cam_dist_m
         return (z * (float(u) - self.cx) / self.f, z * (float(v) - self.cy) / self.f, z)
 
     def fuse_keypoints(self, kp_a, kp_b, cf_a=None, cf_b=None):
@@ -683,6 +685,7 @@ class VisionEngine(threading.Thread):
 
         self._ts = self._fresh_ts(); self._ts_t0 = 0.0
         self._go = True; self._lock = threading.Lock()
+        self._calibrated = False  # se establece en True al confirmar CameraSetupDialog
 
         self._frame_a = self._frame_b = self._frame_c = None
         self._stats = {}; self._pids = []
@@ -1214,6 +1217,147 @@ def _fighter_label(p: dict) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
+#  CAMERA CONFIG  —  guardar/cargar parámetros de posición de cámaras
+# ══════════════════════════════════════════════════════════════════
+_CAMERA_CONFIG_PATH = "camera_config.json"
+
+def _load_camera_config():
+    """Carga baseline y distancia guardados de la sesión anterior."""
+    try:
+        import json
+        with open(_CAMERA_CONFIG_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_camera_config(bl_ab: float, bl_ac: float, dist: float) -> None:
+    """Persiste los parámetros de calibración para la próxima sesión."""
+    import json
+    with open(_CAMERA_CONFIG_PATH, "w") as f:
+        json.dump({"baseline_ab": bl_ab, "baseline_ac": bl_ac, "cam_dist_m": dist}, f, indent=2)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  CAMERA SETUP DIALOG  —  calibración de posición antes de sesión
+# ══════════════════════════════════════════════════════════════════
+class CameraSetupDialog(ctk.CTkToplevel):
+    """
+    Diálogo modal de calibración de cámaras.
+    Debe confirmarse antes de iniciar cualquier sesión para garantizar
+    que los parámetros 3D (baseline, distancia) sean correctos.
+    """
+
+    def __init__(self, parent, engine: "VisionEngine"):
+        super().__init__(parent)
+        self._engine = engine
+        self.title("⊙ Configuración de Cámaras")
+        self.resizable(False, False)
+        self.configure(fg_color=GUI_BG)
+        self.grab_set()
+
+        cfg = _load_camera_config()
+        bl_ab_def = cfg.get("baseline_ab", engine.stereo_ab.B)
+        bl_ac_def = cfg.get("baseline_ac", engine.stereo_ac.B)
+        dist_def  = cfg.get("cam_dist_m",  engine.stereo_ab.cam_dist_m)
+
+        pad = dict(padx=16, pady=6)
+        EF  = dict(fg_color=GUI_CARD, border_color=GUI_BORDER, height=34,
+                   font=ctk.CTkFont(size=12))
+        LF  = dict(font=ctk.CTkFont(size=10), text_color=GUI_GRAY, anchor="w")
+
+        # ── Título ──────────────────────────────────────────────────
+        ctk.CTkLabel(self, text="Posición de Cámaras",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=GUI_WHITE).pack(padx=16, pady=(16, 4))
+        ctk.CTkLabel(self,
+            text="Ingresa las medidas físicas del setup antes de cada sesión.",
+            font=ctk.CTkFont(size=10), text_color=GUI_GRAY,
+            wraplength=320).pack(padx=16, pady=(0, 10))
+
+        # ── Vista previa Cámara A (mejor esfuerzo) ──────────────────
+        self._preview_lbl = ctk.CTkLabel(self, text="", width=320, height=180,
+            fg_color=GUI_CARD, corner_radius=6)
+        self._preview_lbl.pack(padx=16, pady=(0, 10))
+        self._refresh_preview()
+
+        # ── Campos de configuración ──────────────────────────────────
+        form = ctk.CTkFrame(self, fg_color=GUI_PANEL, corner_radius=8)
+        form.pack(fill="x", padx=16, pady=(0, 8))
+
+        ctk.CTkLabel(form, text="Baseline Cám A ↔ B (m)", **LF).pack(anchor="w", padx=12, pady=(10, 0))
+        self._e_bl_ab = ctk.CTkEntry(form, **EF)
+        self._e_bl_ab.insert(0, f"{bl_ab_def:.2f}")
+        self._e_bl_ab.pack(fill="x", padx=12, pady=(2, 6))
+
+        ctk.CTkLabel(form, text="Baseline Cám A ↔ C (m)", **LF).pack(anchor="w", padx=12)
+        self._e_bl_ac = ctk.CTkEntry(form, **EF)
+        self._e_bl_ac.insert(0, f"{bl_ac_def:.2f}")
+        self._e_bl_ac.pack(fill="x", padx=12, pady=(2, 6))
+
+        ctk.CTkLabel(form, text="Distancia cámara → ring (m)", **LF).pack(anchor="w", padx=12)
+        self._e_dist = ctk.CTkEntry(form, **EF)
+        self._e_dist.insert(0, f"{dist_def:.1f}")
+        self._e_dist.pack(fill="x", padx=12, pady=(2, 10))
+
+        # ── Aviso ────────────────────────────────────────────────────
+        self._err_lbl = ctk.CTkLabel(self,
+            text="⚠  Calibra antes de cada sesión para evitar falsos positivos",
+            font=ctk.CTkFont(size=9), text_color=GUI_YELLOW, wraplength=320)
+        self._err_lbl.pack(padx=16, pady=(0, 8))
+
+        # ── Botones ──────────────────────────────────────────────────
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(0, 16))
+        btn_row.columnconfigure((0, 1), weight=1)
+        BF = dict(corner_radius=7, height=36, font=ctk.CTkFont(size=11, weight="bold"))
+        ctk.CTkButton(btn_row, text="Cancelar",
+            fg_color=GUI_PANEL, text_color=GUI_GRAY,
+            border_color=GUI_BORDER, border_width=1,
+            hover_color=GUI_CARD,
+            command=self.destroy, **BF).grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        ctk.CTkButton(btn_row, text="✓  Confirmar",
+            fg_color=GUI_GREEN, text_color=GUI_BG,
+            hover_color="#28b84e",
+            command=self._confirm, **BF).grid(row=0, column=1, padx=(4, 0), sticky="ew")
+
+    def _refresh_preview(self):
+        """Muestra el último frame de Cámara A como vista previa."""
+        try:
+            fa, _, _ = self._engine.get_frames()
+            if fa is not None:
+                img = Image.fromarray(cv2.cvtColor(fa, cv2.COLOR_BGR2RGB))
+                img.thumbnail((320, 180))
+                ctk_img = ctk.CTkImage(light_image=img, dark_image=img,
+                                       size=(320, 180))
+                self._preview_lbl.configure(image=ctk_img, text="")
+                self._preview_lbl._ctk_image = ctk_img  # evita GC
+        except Exception:
+            self._preview_lbl.configure(text="[Sin vista previa]",
+                                        text_color=GUI_GRAY)
+
+    def _confirm(self):
+        try:
+            bl_ab = max(0.05, float(self._e_bl_ab.get()))
+            bl_ac = max(0.05, float(self._e_bl_ac.get()))
+            dist  = max(0.50, float(self._e_dist.get()))
+        except ValueError:
+            self._err_lbl.configure(
+                text="⚠  Valores inválidos — ingresa números positivos",
+                text_color=GUI_RED)
+            return
+
+        self._engine.stereo_ab.B          = bl_ab
+        self._engine.stereo_ab.cam_dist_m = dist
+        self._engine.stereo_ac.B          = bl_ac
+        self._engine.stereo_ac.cam_dist_m = dist
+        self._engine._calibrated          = True
+        self._engine._log(
+            f"[CALIB] A↔B={bl_ab:.2f}m  A↔C={bl_ac:.2f}m  dist={dist:.1f}m")
+        _save_camera_config(bl_ab, bl_ac, dist)
+        self.destroy()
+
+
+# ══════════════════════════════════════════════════════════════════
 #  FIGHTER SELECT DIALOG  —  selección de peleadores + sesión oficial
 # ══════════════════════════════════════════════════════════════════
 class FighterSelectDialog(ctk.CTkToplevel):
@@ -1478,6 +1622,13 @@ class FighterIDApp(ctk.CTk):
             text_color=GUI_ORANGE, border_color=GUI_ORANGE, border_width=1,
             hover_color=GUI_CARD, command=self._cmd_clear, **B).pack(fill="x", padx=12, pady=2)
 
+        sep(); lbl("CÁMARAS")
+        ctk.CTkButton(parent, text="⊙  CALIBRAR",
+            fg_color=GUI_PANEL, text_color=GUI_CYAN,
+            border_color=GUI_CYAN, border_width=1,
+            hover_color=GUI_CARD,
+            command=self._cmd_calibrate, **B).pack(fill="x", padx=12, pady=2)
+
         sep(); lbl("BASELINE A↔B (m)")
         self._bl_entry = ctk.CTkEntry(parent, placeholder_text="1.50",
             fg_color=GUI_CARD, border_color=GUI_BORDER, height=32)
@@ -1601,6 +1752,8 @@ class FighterIDApp(ctk.CTk):
         self._running = True
         self.after(33, self._update_gui)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Solicitar calibración al inicio de cada sesión de aplicación
+        self.after(700, self._cmd_calibrate)
 
     # ── Loop GUI @ ~30 fps ─────────────────────────────────────────
     def _update_gui(self):
@@ -1696,8 +1849,21 @@ class FighterIDApp(ctk.CTk):
         if _FAPI:
             threading.Thread(target=_FAPI.start_session_test, daemon=True).start()
 
+    def _cmd_calibrate(self):
+        if not self._engine:
+            return
+        dlg = CameraSetupDialog(self, self._engine)
+        self.wait_window(dlg)
+
     def _cmd_start(self):
-        if self._engine and not self._engine.cmd_start():
+        if not self._engine:
+            return
+        if not self._engine._calibrated:
+            self._top_status.configure(
+                text="⚠ Calibra las cámaras primero", text_color=GUI_YELLOW)
+            self._cmd_calibrate()
+            return
+        if not self._engine.cmd_start():
             self._top_status.configure(text="⚠ Asigna roles primero", text_color=GUI_YELLOW)
 
     def _cmd_pause(self):
