@@ -107,3 +107,17 @@ REPLAY_SPEED_THRESHOLD = float(os.getenv("REPLAY_SPEED_THRESHOLD", "5.5"))  # m/
 REPLAY_BUFFER_FRAMES   = int(os.getenv("REPLAY_BUFFER_FRAMES",   "120"))    # ~4s @ 30fps
 HIT_EFFECT_FRAMES      = int(os.getenv("HIT_EFFECT_FRAMES",       "18"))    # duración animación HIT
 HEATMAP_BLUR_RADIUS    = int(os.getenv("HEATMAP_BLUR_RADIUS",     "30"))    # radio blur gaussiano (px)
+
+# ── Versiones del motor (control de versiones en cada evento) ──────────
+MODEL_VERSION = os.getenv("MODEL_VERSION", "v1.0.0")   # versión del modelo de detección
+RULES_VERSION = os.getenv("RULES_VERSION", "v1.0.0")   # versión del motor de reglas de boxeo
+
+# ── Feature Flags — activar/desactivar subsistemas sin redeploy ────────
+FF_NEW_SCORING_ENGINE  = os.getenv("FF_NEW_SCORING_ENGINE",  "true").strip().lower() == "true"
+FF_NEW_HIT_FILTERS     = os.getenv("FF_NEW_HIT_FILTERS",     "true").strip().lower() == "true"
+FF_NEW_DETECTION_MODEL = os.getenv("FF_NEW_DETECTION_MODEL", "false").strip().lower() == "true"
+FF_EMIT_SCORING_EVENTS = os.getenv("FF_EMIT_SCORING_EVENTS", "true").strip().lower() == "true"
+
+# ── Buffer de reintentos (eventos que no pudieron enviarse a Supabase) ─
+RETRY_BUFFER_PATH  = os.getenv("RETRY_BUFFER_PATH",  "buffer/pending_events.jsonl")
+RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "5"))
