@@ -1,6 +1,6 @@
 # Code Review Report — Fighter-ID-Vision3D
 
-_Generated: 2026-04-01 23:18 UTC_  
+_Generated: 2026-04-02 22:20 UTC_  
 _Target: `/home/user/Fighter-ID-Vision3D`_
 
 ---
@@ -9,11 +9,11 @@ _Target: `/home/user/Fighter-ID-Vision3D`_
 
 | Category | HIGH | MEDIUM | LOW | Total |
 |----------|------|--------|-----|-------|
-| Code Quality | 24 | 16 | 498 | 538 |
-| PR Changes | 2 | 6 | 2 | 10 |
-| **Combined** | **26** | **22** | **500** | **548** |
+| Code Quality | 30 | 17 | 572 | 619 |
+| PR Changes | 0 | 0 | 0 | 0 |
+| **Combined** | **30** | **17** | **572** | **619** |
 
-> **31** Python files scanned.
+> **49** Python files scanned.
 
 ---
 
@@ -24,7 +24,7 @@ These issues carry the highest risk and should be addressed before merging.
 | Severity | File | Line | Issue |
 |----------|------|------|-------|
 | HIGH | `check_system.py` | 78 | Hardcoded Supabase URL appears hardcoded. Use environment variables instead. |
-| HIGH | `fighterid_supabase_bridge.py` | 74 | Class `FighterIDAPI` defined in multiple files: fighterid_supabase_bridge.py:74, fighterid_vision_engine/pipeline/engine.py:100, vision_motor_v1.py:98. Consolidate to one location. |
+| HIGH | `fighterid_supabase_bridge.py` | 74 | Class `FighterIDAPI` defined in multiple files: fighterid_supabase_bridge.py:74, fighterid_vision_engine/pipeline/engine.py:112, vision_motor_v1.py:98. Consolidate to one location. |
 | HIGH | `fighterid_vision_engine/camera/capture.py` | — | No test file found for `capture`. Expected `tests/test_capture.py`. Critical algorithm code needs unit tests. |
 | HIGH | `fighterid_vision_engine/camera/capture.py` | 16 | Class `CameraStream` defined in multiple files: fighterid_vision_engine/camera/capture.py:16, vision_motor_v1.py:175. Consolidate to one location. |
 | HIGH | `fighterid_vision_engine/config/settings.py` | — | No test file found for `settings`. Expected `tests/test_settings.py`. Critical algorithm code needs unit tests. |
@@ -32,8 +32,13 @@ These issues carry the highest risk and should be addressed before merging.
 | HIGH | `fighterid_vision_engine/detection/pose.py` | 80 | Class `PoseDetector` defined in multiple files: fighterid_vision_engine/detection/pose.py:80, vision_motor_v1.py:246. Consolidate to one location. |
 | HIGH | `fighterid_vision_engine/detection/tracker.py` | — | No test file found for `tracker`. Expected `tests/test_tracker.py`. Critical algorithm code needs unit tests. |
 | HIGH | `fighterid_vision_engine/detection/tracker.py` | 153 | Class `SimpleTracker` defined in multiple files: fighterid_vision_engine/detection/tracker.py:153, vision_motor_v1.py:377. Consolidate to one location. |
+| HIGH | `fighterid_vision_engine/events/factory.py` | — | No test file found for `factory`. Expected `tests/test_factory.py`. Critical algorithm code needs unit tests. |
+| HIGH | `fighterid_vision_engine/events/models.py` | — | No test file found for `models`. Expected `tests/test_models.py`. Critical algorithm code needs unit tests. |
+| HIGH | `fighterid_vision_engine/events/validators.py` | — | No test file found for `validators`. Expected `tests/test_validators.py`. Critical algorithm code needs unit tests. |
+| HIGH | `fighterid_vision_engine/features/flags.py` | — | No test file found for `flags`. Expected `tests/test_flags.py`. Critical algorithm code needs unit tests. |
+| HIGH | `fighterid_vision_engine/observability/logger.py` | — | No test file found for `logger`. Expected `tests/test_logger.py`. Critical algorithm code needs unit tests. |
 | HIGH | `fighterid_vision_engine/pipeline/engine.py` | — | No test file found for `engine`. Expected `tests/test_engine.py`. Critical algorithm code needs unit tests. |
-| HIGH | `fighterid_vision_engine/pipeline/engine.py` | 337 | Class `VisionMotorV1` defined in multiple files: fighterid_vision_engine/pipeline/engine.py:337, vision_motor_v1.py:487. Consolidate to one location. |
+| HIGH | `fighterid_vision_engine/pipeline/engine.py` | 349 | Class `VisionMotorV1` defined in multiple files: fighterid_vision_engine/pipeline/engine.py:349, vision_motor_v1.py:487. Consolidate to one location. |
 | HIGH | `fighterid_vision_engine/pipeline/fighters_state.py` | — | No test file found for `fighters_state`. Expected `tests/test_fighters_state.py`. Critical algorithm code needs unit tests. |
 | HIGH | `fighterid_vision_engine/pipeline/heatmap.py` | — | No test file found for `heatmap`. Expected `tests/test_heatmap.py`. Critical algorithm code needs unit tests. |
 | HIGH | `fighterid_vision_engine/pipeline/recorder.py` | — | No test file found for `recorder`. Expected `tests/test_recorder.py`. Critical algorithm code needs unit tests. |
@@ -42,13 +47,12 @@ These issues carry the highest risk and should be addressed before merging.
 | HIGH | `fighterid_vision_engine/pipeline/strike.py` | — | No test file found for `strike`. Expected `tests/test_strike.py`. Critical algorithm code needs unit tests. |
 | HIGH | `fighterid_vision_engine/pipeline/strike.py` | 24 | Class `StrikeDetector` defined in multiple files: fighterid_vision_engine/pipeline/strike.py:24, vision_motor_v1.py:399. Consolidate to one location. |
 | HIGH | `fighterid_vision_engine/pipeline/temporal_strike.py` | — | No test file found for `temporal_strike`. Expected `tests/test_temporal_strike.py`. Critical algorithm code needs unit tests. |
+| HIGH | `fighterid_vision_engine/sync/retry_queue.py` | — | No test file found for `retry_queue`. Expected `tests/test_retry_queue.py`. Critical algorithm code needs unit tests. |
 | HIGH | `supabase_client.py` | 7 | Hardcoded Supabase URL appears hardcoded. Use environment variables instead. |
 | HIGH | `supabase_client.py` | 8 | Possible JWT token appears hardcoded. Use environment variables instead. |
 | HIGH | `vision_motor_v1.py` | 62 | Hardcoded Supabase URL appears hardcoded. Use environment variables instead. |
 | HIGH | `vision_motor_v1.py` | 64 | Possible JWT token appears hardcoded. Use environment variables instead. |
 | HIGH | `vision_motor_v1.py` | 65 | Possible JWT token appears hardcoded. Use environment variables instead. |
-| HIGH | `` | 618 | Hardcoded Supabase URL found in diff at line 618: +SUPABASE_URL = "https://abcxyz123.supabase.co" |
-| HIGH | `` | 619 | Supabase publishable key found in diff at line 619: +API_KEY = "sb_publishable_abcdef..." |
 
 ## Medium Priority Issues
 
@@ -59,7 +63,8 @@ Address these in the current sprint or immediately after merging.
 | MEDIUM | `fight_manager.py` | — | File has a syntax error and could not be parsed. |
 | MEDIUM | `fighterid_supabase_bridge.py` | 910 | File has 910 lines (>500). Consider splitting into smaller modules. |
 | MEDIUM | `fighterid_vision_engine/main.py` | 22 | Bare `except:` catches all exceptions including KeyboardInterrupt/SystemExit. Use `except Exception:` or be specific. |
-| MEDIUM | `fighterid_vision_engine/pipeline/engine.py` | 633 | File has 633 lines (>500). Consider splitting into smaller modules. |
+| MEDIUM | `fighterid_vision_engine/pipeline/engine.py` | 772 | File has 772 lines (>500). Consider splitting into smaller modules. |
+| MEDIUM | `tests/test_regression.py` | 515 | File has 515 lines (>500). Consider splitting into smaller modules. |
 | MEDIUM | `three_camera_ui.py` | 112 | Bare `except:` catches all exceptions including KeyboardInterrupt/SystemExit. Use `except Exception:` or be specific. |
 | MEDIUM | `three_camera_ui.py` | 174 | Bare `except:` catches all exceptions including KeyboardInterrupt/SystemExit. Use `except Exception:` or be specific. |
 | MEDIUM | `three_camera_ui.py` | 443 | Bare `except:` catches all exceptions including KeyboardInterrupt/SystemExit. Use `except Exception:` or be specific. |
@@ -72,12 +77,6 @@ Address these in the current sprint or immediately after merging.
 | MEDIUM | `tools/calibrate_cameras.py` | 562 | File has 562 lines (>500). Consider splitting into smaller modules. |
 | MEDIUM | `tools/tune_thresholds.py` | 541 | File has 541 lines (>500). Consider splitting into smaller modules. |
 | MEDIUM | `vision_motor_v1.py` | 635 | File has 635 lines (>500). Consider splitting into smaller modules. |
-| MEDIUM | `` | — | `.claude/skills/code-reviewer/references/code_review_checklist.md` was modified but no corresponding test file was changed. |
-| MEDIUM | `` | — | `.claude/skills/code-reviewer/references/coding_standards.md` was modified but no corresponding test file was changed. |
-| MEDIUM | `` | — | `.claude/skills/code-reviewer/references/common_antipatterns.md` was modified but no corresponding test file was changed. |
-| MEDIUM | `` | — | `.claude/skills/code-reviewer/scripts/code_quality_checker.py` was modified but no corresponding test file was changed. |
-| MEDIUM | `` | — | `.claude/skills/code-reviewer/scripts/pr_analyzer.py` was modified but no corresponding test file was changed. |
-| MEDIUM | `` | — | `.claude/skills/code-reviewer/scripts/review_report_generator.py` was modified but no corresponding test file was changed. |
 
 ## Low Priority Issues
 
@@ -191,37 +190,46 @@ Address these in the current sprint or immediately after merging.
 | LOW | `fighterid_vision_engine/detection/pose.py` | 157 | Use `logging` instead of `print()` in library/engine modules. |
 | LOW | `fighterid_vision_engine/detection/pose.py` | 201 | Use `logging` instead of `print()` in library/engine modules. |
 | LOW | `fighterid_vision_engine/detection/tracker.py` | 160 | Function `assign` is missing a docstring. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 84 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 87 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 89 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 115 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 116 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 131 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 156 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 157 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 166 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 182 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 203 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 205 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 231 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 233 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 254 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 256 | Function `resolve_fighter`: missing return type. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 352 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 373 | Function `start` is missing a docstring. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 393 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 402 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 406 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 415 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 423 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 429 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 438 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 455 | TODO comment: # Replay: buffer todo frame antes de procesar |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 483 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 528 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 622 | Function `stop` is missing a docstring. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 632 | Use `logging` instead of `print()` in library/engine modules. |
-| LOW | `fighterid_vision_engine/pipeline/engine.py` | 633 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/events/factory.py` | 45 | Function `hit_detected` is missing a docstring. |
+| LOW | `fighterid_vision_engine/events/factory.py` | 78 | Function `knockdown` is missing a docstring. |
+| LOW | `fighterid_vision_engine/events/factory.py` | 108 | Function `round_start` is missing a docstring. |
+| LOW | `fighterid_vision_engine/events/factory.py` | 129 | Function `round_end` is missing a docstring. |
+| LOW | `fighterid_vision_engine/events/factory.py` | 150 | Function `fighter_identified` is missing a docstring. |
+| LOW | `fighterid_vision_engine/events/factory.py` | 173 | Function `invalid_hit` is missing a docstring. |
+| LOW | `fighterid_vision_engine/events/factory.py` | 203 | Function `referee_intervention` is missing a docstring. |
+| LOW | `fighterid_vision_engine/events/models.py` | 106 | Function `to_dict` is missing a docstring. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 96 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 99 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 101 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 127 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 128 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 143 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 168 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 169 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 178 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 194 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 215 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 217 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 243 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 245 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 266 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 268 | Function `resolve_fighter`: missing return type. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 364 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 399 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 401 | Function `start` is missing a docstring. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 424 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 433 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 437 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 446 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 458 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 464 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 477 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 494 | TODO comment: # Replay: buffer todo frame antes de procesar |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 522 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 576 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 757 | Function `stop` is missing a docstring. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 771 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/pipeline/engine.py` | 772 | Use `logging` instead of `print()` in library/engine modules. |
 | LOW | `fighterid_vision_engine/pipeline/fighters_state.py` | 57 | Use `logging` instead of `print()` in library/engine modules. |
 | LOW | `fighterid_vision_engine/pipeline/recorder.py` | 27 | Use `logging` instead of `print()` in library/engine modules. |
 | LOW | `fighterid_vision_engine/pipeline/recorder.py` | 29 | Function `write` is missing a docstring. |
@@ -230,6 +238,12 @@ Address these in the current sprint or immediately after merging.
 | LOW | `fighterid_vision_engine/pipeline/replay.py` | 107 | Function `is_playing` is missing a docstring. |
 | LOW | `fighterid_vision_engine/pipeline/strike.py` | 38 | Function `detect`: missing return type. |
 | LOW | `fighterid_vision_engine/pipeline/strike.py` | 38 | Function `detect` is missing a docstring. |
+| LOW | `fighterid_vision_engine/scoring/rules_engine.py` | 262 | Function `evaluate` is missing a docstring. |
+| LOW | `fighterid_vision_engine/sync/event_producer.py` | 93 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/sync/event_producer.py` | 192 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/sync/retry_queue.py` | 120 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/sync/retry_queue.py` | 131 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `fighterid_vision_engine/sync/retry_queue.py` | 149 | Use `logging` instead of `print()` in library/engine modules. |
 | LOW | `find_unused.py` | 14 | Use `logging` instead of `print()` in library/engine modules. |
 | LOW | `find_unused.py` | 18 | Use `logging` instead of `print()` in library/engine modules. |
 | LOW | `main.py` | 35 | Function `main` is missing a docstring. |
@@ -259,6 +273,65 @@ Address these in the current sprint or immediately after merging.
 | LOW | `supabase_client.py` | 149 | Use `logging` instead of `print()` in library/engine modules. |
 | LOW | `supabase_client.py` | 150 | Use `logging` instead of `print()` in library/engine modules. |
 | LOW | `supabase_client.py` | 154 | Use `logging` instead of `print()` in library/engine modules. |
+| LOW | `tests/test_event_model.py` | 23 | Class `TestCombatEventImmutability` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 24 | Function `test_event_is_frozen` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 33 | Function `test_metadata_is_accessible` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 43 | Function `test_to_dict_is_serializable` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 56 | Class `TestCombatEventFactory` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 57 | Function `test_hit_detected_has_required_fields` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 71 | Function `test_knockdown_event` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 79 | Function `test_round_start_event` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 89 | Function `test_round_end_event` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 96 | Function `test_fighter_identified_event` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 104 | Function `test_invalid_hit_event` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 113 | Function `test_referee_intervention_event` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 123 | Class `TestEventValidation` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 133 | Function `test_valid_event_passes` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 137 | Function `test_empty_fight_id_fails` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 146 | Function `test_confidence_out_of_range_fails` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 161 | Function `test_negative_confidence_fails` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 174 | Function `test_invalid_corner_fails` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 189 | Function `test_invalid_event_type_fails` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 202 | Function `test_missing_metadata_fields_fails` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 215 | Function `test_invalid_version_format_fails` is missing a docstring. |
+| LOW | `tests/test_event_model.py` | 230 | Function `test_invalid_timestamp_fails` is missing a docstring. |
+| LOW | `tests/test_event_producer.py` | 39 | Class `TestRetryQueue` is missing a docstring. |
+| LOW | `tests/test_event_producer.py` | 40 | Function `test_enqueue_writes_to_buffer` is missing a docstring. |
+| LOW | `tests/test_event_producer.py` | 57 | Function `test_successful_send_removes_from_buffer` is missing a docstring. |
+| LOW | `tests/test_event_producer.py` | 67 | Function `mock_send`: args missing annotations: e; missing return type. |
+| LOW | `tests/test_event_producer.py` | 67 | Function `mock_send` is missing a docstring. |
+| LOW | `tests/test_event_producer.py` | 80 | Function `test_pending_count_reflects_buffer` is missing a docstring. |
+| LOW | `tests/test_event_producer.py` | 91 | Class `TestEventProducer` is missing a docstring. |
+| LOW | `tests/test_regression.py` | 151 | Function `test_all_events_have_fight_id` is missing a docstring. |
+| LOW | `tests/test_regression.py` | 156 | Function `test_all_events_are_valid` is missing a docstring. |
+| LOW | `tests/test_regression.py` | 161 | Function `test_12_rounds_scored` is missing a docstring. |
+| LOW | `tests/test_regression.py` | 165 | Function `test_no_duplicate_round_numbers` is missing a docstring. |
+| LOW | `tests/test_regression.py` | 188 | Function `test_all_round_scores_have_versions` is missing a docstring. |
+| LOW | `tests/test_regression.py` | 256 | Function `test_no_event_has_empty_fight_id` is missing a docstring. |
+| LOW | `tests/test_regression.py` | 275 | Function `test_knockdown_overrides_round_winner` is missing a docstring. |
+| LOW | `tests/test_regression.py` | 293 | Function `test_knockdown_event_is_valid` is missing a docstring. |
+| LOW | `tests/test_regression.py` | 297 | Function `test_knockdown_event_has_correct_type` is missing a docstring. |
+| LOW | `tests/test_regression.py` | 301 | Function `test_knockdown_processed_correctly` is missing a docstring. |
+| LOW | `tests/test_regression.py` | 345 | Function `test_supabase_failure_saves_to_buffer` is missing a docstring. |
+| LOW | `tests/test_regression.py` | 461 | Class `TestDataIntegrity` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 53 | Class `TestConfidenceFilter` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 54 | Function `test_high_confidence_accepted` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 61 | Function `test_exact_threshold_accepted` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 67 | Function `test_below_threshold_rejected` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 74 | Function `test_zero_confidence_rejected` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 81 | Class `TestTargetZoneFilter` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 82 | Function `test_head_target_accepted` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 88 | Function `test_body_target_accepted` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 94 | Function `test_unknown_target_rejected` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 101 | Function `test_empty_target_rejected` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 108 | Class `TestDeduplification` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 154 | Class `TestScoring` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 155 | Function `test_clean_hit_gives_1_point` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 162 | Function `test_dominant_hit_gives_2_points` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 169 | Function `test_knockdown_gives_10_points` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 180 | Function `test_non_scoring_event_gives_0_points` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 190 | Class `TestComputeRoundScore` is missing a docstring. |
+| LOW | `tests/test_rules_engine.py` | 242 | Function `test_empty_events_gives_zero_score` is missing a docstring. |
 | LOW | `three_camera_ui.py` | 115 | Function `detect_cameras`: missing return type. |
 | LOW | `three_camera_ui.py` | 265 | Class `StereoFuser` is missing a docstring. |
 | LOW | `three_camera_ui.py` | 274 | Function `triangulate`: args missing annotations: u_a, v_a, u_b, v_b; missing return type. |
@@ -584,8 +657,6 @@ Address these in the current sprint or immediately after merging.
 | LOW | `vision_sync.py` | 37 | Function `crear_pelea`: args missing annotations: event_id, fighter_a_id, fighter_b_id; missing return type. |
 | LOW | `vision_sync.py` | 82 | Function `iniciar_sesion`: args missing annotations: device_id, fight_id; missing return type. |
 | LOW | `vision_sync.py` | 118 | Function `enviar_evento`: args missing annotations: device_id, fight_id, fighter_id, tipo, confidence; missing return type. |
-| LOW | `` | 835 | New TODO added in diff: +    pattern = re.compile(r"#.*(TODO|FIXME|HACK|XXX)\b", re.IGNORECASE) |
-| LOW | `` | 1248 | New TODO added in diff: +    todo_pat = re.compile(r"\+(.*?)(TODO|FIXME|HACK|XXX)\b", re.IGNORECASE) |
 
 </details>
 
@@ -593,20 +664,14 @@ Address these in the current sprint or immediately after merging.
 
 ## PR Changes
 
-**Branch:** `claude/setup-code-reviewer-template-J8QWV`  
-**Base:** `424327a2c5a5`  
-**Changes:** 6 files, +1221 / -447 lines
+**Branch:** `claude/code-review-audit-rKJjQ`  
+**Base:** `a2bf65d74138`  
+**Changes:** 0 files, +0 / -0 lines
 
 ### File Risk Assessment
 
 | Risk | File |
 |------|------|
-| LOW | `.claude/skills/code-reviewer/references/code_review_checklist.md` |
-| LOW | `.claude/skills/code-reviewer/references/coding_standards.md` |
-| LOW | `.claude/skills/code-reviewer/references/common_antipatterns.md` |
-| LOW | `.claude/skills/code-reviewer/scripts/code_quality_checker.py` |
-| LOW | `.claude/skills/code-reviewer/scripts/pr_analyzer.py` |
-| LOW | `.claude/skills/code-reviewer/scripts/review_report_generator.py` |
 
 ---
 
@@ -619,6 +684,34 @@ Address these in the current sprint or immediately after merging.
 - Configuration centralised in `settings.py` with URL-validation helpers, sourced from `.env` via `python-dotenv`.
 - 3-layer temporal strike detection (`temporal_strike.py`) provides a well-structured kinematic analysis pipeline.
 - Hungarian algorithm tracker (`tracker.py`) maintains stable RED/BLUE fighter identity across occlusions.
+
+---
+
+## Manual Review Findings
+
+The following issues were identified through manual inspection and are not captured by automated static analysis:
+
+### HIGH
+
+| File | Issue |
+|------|-------|
+| `.env.example` | Contains a real Supabase project URL (`https://eeshomcqztvjkvycdwi.supabase.co`) and a real anon key. `.env.example` is committed to git and publicly visible. Replace all values with clearly-fake placeholders (e.g. `https://your-project.supabase.co`, `your-anon-key-here`). |
+
+### MEDIUM
+
+| Area | Issue |
+|------|-------|
+| `fighterid_supabase_bridge.py` — threading | Three concurrent worker threads (event worker, session manager, heartbeat) share state with minimal documentation. Thread startup order and shutdown protocol are not documented. Risk of race conditions on `_session_id` and `_fight_id` if workers start before initialisation completes. |
+| `requirements.txt` — reproducibility | No lock file (`pip-tools` `.txt` pin, `poetry.lock`, or `Pipfile.lock`). Unpinned transitive dependencies mean `pip install` can silently upgrade/downgrade packages, breaking inference or Supabase client behaviour across environments. |
+
+### LOW (CI/CD Gaps)
+
+| Gap | Recommendation |
+|-----|----------------|
+| No Python linter | Add `ruff` (or `flake8` + `black`) to `.github/workflows/lint.yml` to enforce style and catch obvious errors. |
+| No type checker | Add `mypy --strict` (or at minimum `mypy` on `fighterid_vision_engine/`) to CI to catch `None`-dereference and mismatched return types. |
+| No security scanner | Add `bandit -r fighterid_vision_engine/` and `pip-audit` to CI. `bandit` will catch subprocess injection, hardcoded passwords, and insecure random usage. `pip-audit` will flag CVEs in dependencies. |
+| CI scope too narrow | `.github/workflows/lint.yml` only syntax-checks 4 explicit files. Extend to `python -m py_compile $(git ls-files '*.py')` or use `ruff check .` to cover the full repo. |
 
 ---
 
