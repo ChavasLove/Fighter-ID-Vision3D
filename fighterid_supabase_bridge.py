@@ -40,6 +40,7 @@ import threading
 import time
 import uuid as _uuid_mod
 from collections import deque
+from datetime import date, datetime
 
 import requests
 
@@ -268,21 +269,93 @@ class FighterIDAPI:
     # Fighter profiles — for OfficialSessionDialog
     # ------------------------------------------------------------------
 
-    def list_fighter_profiles(self):
+    @staticmethod
+    def _normalize_license_doc(row: dict) -> dict:
         """
-        Returns list of fighter profile dicts for the session dialog.
-        Uses SELECT * so it works regardless of which optional columns exist
-        in the live DB (gym, total_fights, accuracy, etc.).
+        Maps a license_documents row to the fighter profile dict shape expected by the UI.
+        Handles multiple possible column naming conventions defensively.
+        Adds private keys (_license_valid, _license_status, _license_expires,
+        _license_number, _source) for the UI to display without extra queries.
+        """
+        # ── Name ─────────────────────────────────────────────────────
+        first = (row.get("first_name") or "").strip()
+        last  = (row.get("last_name")  or "").strip()
+        composed = f"{first} {last}".strip()
+        full_name = (row.get("full_name") or row.get("name") or composed or "Sin nombre").strip()
+
+        # ── License validity ──────────────────────────────────────────
+        status_raw = (row.get("status") or "unknown").strip().lower()
+        expires_str = (row.get("expiry_date") or row.get("expires_at")
+                       or row.get("valid_until") or "").strip()
+        active_statuses = {"active", "vigente", "valid", "activo", "approved", "aprobado"}
+        status_ok = status_raw in active_statuses
+        date_ok   = True
+        if expires_str:
+            try:
+                exp_date = datetime.fromisoformat(expires_str[:10]).date()
+                date_ok  = exp_date >= date.today()
+            except ValueError:
+                date_ok = True  # unparseable → don't block
+        license_valid = status_ok and date_ok
+
+        return {
+            # ── Standard profile fields (used by existing UI helpers) ──
+            "id":           row.get("id"),
+            "full_name":    full_name,
+            "name":         full_name,
+            "nickname":     (row.get("nickname") or "").strip(),
+            "weight_class": (row.get("weight_class") or row.get("category") or "?").strip(),
+            "gym":          (row.get("gym") or row.get("gym_name") or "").strip(),
+            "record":       row.get("record") or "",
+            # ── License metadata (private keys for UI display / gate) ──
+            "_source":          "license_documents",
+            "_license_valid":   license_valid,
+            "_license_status":  status_raw,
+            "_license_expires": expires_str,
+            "_license_number":  (row.get("license_number") or row.get("license_no") or ""),
+        }
+
+    def list_license_documents(self) -> list:
+        """
+        Fetches all rows from license_documents, normalized to the profile dict shape.
         """
         db = self._get_db()
         if not db:
             return []
+        res = (db.table("license_documents")
+                 .select("*")
+                 .order("id")
+                 .execute())
+        return [self._normalize_license_doc(r) for r in (res.data or [])]
+
+    def list_fighter_profiles(self):
+        """
+        Returns fighter profile dicts for the session dialog.
+        Primary source: license_documents (with license validity metadata).
+        Fallback:       fighter_profiles (backward compat when table is empty/missing).
+        """
+        db = self._get_db()
+        if not db:
+            return []
+        # ── Primary: license_documents ────────────────────────────────
+        try:
+            docs = self.list_license_documents()
+            if docs:
+                print(f"[FighterIDAPI] list_fighter_profiles: {len(docs)} rows from license_documents")
+                return docs
+        except Exception as e:
+            if self._is_disconnect(e):
+                self._reset_db()
+            print(f"[FighterIDAPI] license_documents unavailable: {e}")
+        # ── Fallback: fighter_profiles ────────────────────────────────
         try:
             res = (db.table("fighter_profiles")
                      .select("*")
                      .order("full_name", desc=False)
                      .execute())
-            return res.data or []
+            data = res.data or []
+            print(f"[FighterIDAPI] list_fighter_profiles: {len(data)} rows from fighter_profiles (fallback)")
+            return data
         except Exception as e:
             if self._is_disconnect(e):
                 self._reset_db()

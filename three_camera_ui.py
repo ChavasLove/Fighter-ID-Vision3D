@@ -1206,14 +1206,18 @@ class VisionEngine(threading.Thread):
 # ── Helper para mostrar nombre de peleador en dropdowns ────────────────
 def _fighter_label(p: dict) -> str:
     """
-    Construye la etiqueta del dropdown para un fighter_profiles row.
-    Maneja tanto 'full_name' (producción) como 'name' (legacy).
-    Ejemplo: "Juan Pérez «El Toro» [Peso Ligero]"
+    Construye la etiqueta del dropdown para un fighter_profiles / license_documents row.
+    Si el perfil viene de license_documents, añade badge de validez de licencia.
+    Ejemplo: "Juan Pérez «El Toro» [Peso Ligero]  ✓"
+             "Juan Pérez «El Toro» [Peso Ligero]  ⚠"
     """
     name = (p.get("full_name") or p.get("name") or "Sin nombre").strip()
     wc   = p.get("weight_class") or "?"
     nick = (p.get("nickname") or "").strip()
-    return f"{name}{f' «{nick}»' if nick else ''} [{wc}]"
+    badge = ""
+    if "_license_valid" in p:
+        badge = "  ✓" if p["_license_valid"] else "  ⚠"
+    return f"{name}{f' «{nick}»' if nick else ''} [{wc}]{badge}"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1444,9 +1448,18 @@ class FighterSelectDialog(ctk.CTkToplevel):
         self._blue_cb.configure(values=names)
         self._red_cb.set(names[0])
         self._red_id = profiles[0]["id"]
-        self._status.configure(
-            text=f"{len(profiles)} peleadores cargados",
-            text_color=GUI_GRAY)
+
+        # License summary in status bar
+        from_licenses = [p for p in profiles if "_license_valid" in p]
+        if from_licenses:
+            valid_count   = sum(1 for p in from_licenses if p["_license_valid"])
+            invalid_count = len(from_licenses) - valid_count
+            summary = f"{len(profiles)} peleadores · {valid_count} licencias vigentes"
+            color   = GUI_YELLOW if invalid_count else GUI_GRAY
+        else:
+            summary = f"{len(profiles)} peleadores cargados"
+            color   = GUI_GRAY
+        self._status.configure(text=summary, text_color=color)
 
     def _on_red_select(self, val):
         self._red_id = next(
@@ -1466,6 +1479,19 @@ class FighterSelectDialog(ctk.CTkToplevel):
         if self._red_id == self._blue_id:
             self._status.configure(
                 text="Los peleadores deben ser diferentes", text_color=GUI_ORANGE)
+            return
+        # ── License validation (hard block if loaded from license_documents) ──
+        red_p  = next((p for p in self._profiles if p["id"] == self._red_id),  {})
+        blue_p = next((p for p in self._profiles if p["id"] == self._blue_id), {})
+        if "_license_valid" in red_p and not red_p["_license_valid"]:
+            self._status.configure(
+                text=f"⚠ Licencia ROJA inválida o expirada  ({red_p.get('_license_status','')})",
+                text_color=GUI_RED)
+            return
+        if "_license_valid" in blue_p and not blue_p["_license_valid"]:
+            self._status.configure(
+                text=f"⚠ Licencia AZUL inválida o expirada  ({blue_p.get('_license_status','')})",
+                text_color=GUI_RED)
             return
         rounds = int(self._rounds_var.get())
         self._ok_btn.configure(state="disabled", text="Creando…")
