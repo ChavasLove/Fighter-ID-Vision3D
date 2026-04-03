@@ -102,11 +102,19 @@ SK1_LO=np.array([0,20,60],np.uint8);   SK1_HI=np.array([25,210,255],np.uint8)
 SK2_LO=np.array([0,10,40],np.uint8);   SK2_HI=np.array([20,130,210],np.uint8)
 
 # GUI hex – SOLO para CTk widgets (nunca tuplas BGR)
-GUI_BG      = "#0d0d12"; GUI_PANEL   = "#13131a"; GUI_CARD    = "#1a1a24"
-GUI_BORDER  = "#2a2a3a"; GUI_RED     = "#e03030"; GUI_BLUE    = "#2080ff"
-GUI_CYAN    = "#00e5e5"; GUI_GREEN   = "#30e060"; GUI_YELLOW  = "#e0c020"
-GUI_MAGENTA = "#cc30cc"; GUI_WHITE   = "#e8e8f0"; GUI_GRAY    = "#505060"
-GUI_ORANGE  = "#ff8c00"; GUI_BLACK   = "#08080c"
+# Swiss neutral palette — typography-first design system
+GUI_BG      = "#f2f2f2"; GUI_PANEL   = "#e8e8e8"; GUI_CARD    = "#ffffff"
+GUI_BORDER  = "#d4d4d4"; GUI_RED     = "#b91c1c"; GUI_BLUE    = "#1d4ed8"
+GUI_CYAN    = "#0e7490"; GUI_GREEN   = "#15803d"; GUI_YELLOW  = "#a16207"
+GUI_MAGENTA = "#7e22ce"; GUI_WHITE   = "#111111"; GUI_GRAY    = "#838282"
+GUI_ORANGE  = "#c2410c"; GUI_BLACK   = "#f2f2f2"
+# Echo layer tokens (#bfbfbf → #d9d9d9)
+GUI_ECHO_1  = "#bfbfbf"; GUI_ECHO_2  = "#c9c9c9"
+GUI_ECHO_3  = "#d1d1d1"; GUI_ECHO_4  = "#d9d9d9"
+# Typography — system font equivalents for Clash Display / Satoshi aesthetic
+FONT_DISPLAY = "Arial Black"   # Bold geometric sans (Clash Display equivalent)
+FONT_BODY    = "Arial"         # Clean functional sans (Satoshi equivalent)
+FONT_MONO    = "Courier New"   # Telemetry / log data
 
 # ══════════════════════════════════════════════════════════════════
 #  CAMERA DETECTION  — selección por FPS máximo por dispositivo
@@ -1181,12 +1189,14 @@ class VisionEngine(threading.Thread):
             mtxt, mc = (("TEST",   MAG) if self.tm else
                         ("FIGHT",  CYN) if self.roles.mode == "fight" else ("DETECT", GRY))
 
+            _HUD_BG  = (220, 220, 220)  # Light gray bar — matches GUI_PANEL (#e8e8e8) in BGR
+            _HUD_TXT = (17, 17, 17)     # Near-black text — matches GUI_WHITE (#111111) in BGR
             def hud(img, label, lc):
-                cv2.rectangle(img, (0, 0), (CAM_W, 58), BLK, -1)
+                cv2.rectangle(img, (0, 0), (CAM_W, 58), _HUD_BG, -1)
                 cv2.line(img, (0, 57), (CAM_W, 57), lc, 2)
                 tstxt = f"{m2:02d}:{s2:02d}"
-                cv2.putText(img, tstxt, (CAM_W//2-52, 44), FD, 1.20, (40, 40, 50), 4)
-                cv2.putText(img, tstxt, (CAM_W//2-52, 44), FD, 1.20, WHT, 2)
+                cv2.putText(img, tstxt, (CAM_W//2-52, 44), FD, 1.20, _HUD_BG, 4)
+                cv2.putText(img, tstxt, (CAM_W//2-52, 44), FD, 1.20, _HUD_TXT, 2)
                 cv2.putText(img, label, (10, 38), FS, 0.42, lc, 1)
                 cv2.putText(img, ptxt,  (CAM_W-72, 20), FS, 0.42, pc, 1)
                 cv2.putText(img, mtxt,  (CAM_W-72, 54), FS, 0.42, mc, 1)
@@ -1388,15 +1398,16 @@ class FighterSelectDialog(ctk.CTkToplevel):
 # ══════════════════════════════════════════════════════════════════
 class StatCard(ctk.CTkFrame):
     def __init__(self, parent, label, value="—", unit="", accent=GUI_CYAN, **kw):
-        super().__init__(parent, fg_color=GUI_CARD, corner_radius=8, **kw)
-        ctk.CTkLabel(self, text=label,
-            font=ctk.CTkFont(size=9, weight="bold"),
+        super().__init__(parent, fg_color=GUI_CARD, corner_radius=6,
+                         border_width=1, border_color=GUI_BORDER, **kw)
+        ctk.CTkLabel(self, text=label.upper(),
+            font=ctk.CTkFont(FONT_BODY, 8),
             text_color=GUI_GRAY).pack(anchor="w", padx=8, pady=(6, 0))
         self._val = ctk.CTkLabel(self, text=value,
-            font=ctk.CTkFont("Courier New", 18, weight="bold"), text_color=accent)
+            font=ctk.CTkFont(FONT_DISPLAY, 14, weight="bold"), text_color=accent)
         self._val.pack(anchor="w", padx=8)
         ctk.CTkLabel(self, text=unit if unit else " ",
-            font=ctk.CTkFont(size=8), text_color=GUI_GRAY
+            font=ctk.CTkFont(FONT_BODY, 8), text_color=GUI_GRAY
         ).pack(anchor="w", padx=8, pady=(0, 6))
 
     def set(self, value): self._val.configure(text=str(value))
@@ -1789,9 +1800,9 @@ class CalibrationWizard(ctk.CTkToplevel):
 class FighterIDApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        ctk.set_appearance_mode("dark")
+        ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
-        self.title("FighterID Vision v3.2  —  3-Camera Stereo Biomechanics")
+        self.title("FighterID Vision v3.3  —  3-Camera Stereo Biomechanics")
         self.configure(fg_color=GUI_BG)
 
         sw = self.winfo_screenwidth(); sh = self.winfo_screenheight()
@@ -1807,28 +1818,42 @@ class FighterIDApp(ctk.CTk):
     # ── UI ─────────────────────────────────────────────────────────
     def _build_ui(self):
         # ── Top bar ────────────────────────────────────────────────
-        top = ctk.CTkFrame(self, height=52, fg_color=GUI_PANEL, corner_radius=0)
+        top = ctk.CTkFrame(self, height=56, fg_color=GUI_PANEL, corner_radius=0)
         top.pack(fill="x", side="top"); top.pack_propagate(False)
 
-        ctk.CTkLabel(top, text="⬡  FIGHTER ID  v3.2",
-            font=ctk.CTkFont("Courier New", 16, weight="bold"),
-            text_color=GUI_CYAN).pack(side="left", padx=18, pady=12)
+        # ── Echo Stack title ────────────────────────────────────────
+        _ECHO_TEXT = "⬡  FIGHTER ID  v3.3"
+        _ECHO_FONT = ctk.CTkFont(FONT_DISPLAY, 17, weight="bold")
+        echo_host = ctk.CTkFrame(top, fg_color="transparent", width=310, height=44)
+        echo_host.pack(side="left", padx=(14, 0), pady=6)
+        echo_host.pack_propagate(False)
+        _echo_layers = [
+            ((-4, -3), GUI_ECHO_4),
+            ((-3, -2), GUI_ECHO_3),
+            ((-2, -1), GUI_ECHO_2),
+            ((-1,  0), GUI_ECHO_1),
+        ]
+        for (ox, oy), col in _echo_layers:
+            ctk.CTkLabel(echo_host, text=_ECHO_TEXT, font=_ECHO_FONT,
+                         text_color=col, fg_color="transparent").place(x=4+ox, y=10+oy)
+        ctk.CTkLabel(echo_host, text=_ECHO_TEXT, font=_ECHO_FONT,
+                     text_color=GUI_WHITE, fg_color="transparent").place(x=4, y=10)
 
         self._top_status = ctk.CTkLabel(top, text="Iniciando...",
-            font=ctk.CTkFont(size=11), text_color=GUI_GRAY)
+            font=ctk.CTkFont(FONT_BODY, 11), text_color=GUI_GRAY)
         self._top_status.pack(side="left", padx=10)
 
         self._timer_lbl = ctk.CTkLabel(top, text="03:00",
-            font=ctk.CTkFont("Courier New", 26, weight="bold"),
+            font=ctk.CTkFont(FONT_DISPLAY, 26, weight="bold"),
             text_color=GUI_WHITE)
         self._timer_lbl.pack(side="right", padx=24)
 
         self._round_lbl = ctk.CTkLabel(top, text="ROUND 1",
-            font=ctk.CTkFont(size=13, weight="bold"), text_color=GUI_WHITE)
+            font=ctk.CTkFont(FONT_BODY, 13, weight="bold"), text_color=GUI_WHITE)
         self._round_lbl.pack(side="right", padx=4)
 
         self._phase_lbl = ctk.CTkLabel(top, text="IDLE",
-            font=ctk.CTkFont(size=11, weight="bold"), text_color=GUI_GRAY)
+            font=ctk.CTkFont(FONT_BODY, 11, weight="bold"), text_color=GUI_GRAY)
         self._phase_lbl.pack(side="right", padx=10)
 
         # ── Layout principal ────────────────────────────────────────
@@ -1846,111 +1871,123 @@ class FighterIDApp(ctk.CTk):
         self._build_center(center)
 
     def _build_sidebar(self, parent):
-        B = dict(corner_radius=7, height=36, font=ctk.CTkFont(size=11, weight="bold"))
-        def sep(): ctk.CTkFrame(parent, height=1, fg_color=GUI_BORDER).pack(fill="x", padx=12, pady=7)
-        def lbl(t): ctk.CTkLabel(parent, text=t,
-            font=ctk.CTkFont(size=9, weight="bold"),
-            text_color=GUI_GRAY).pack(anchor="w", padx=14, pady=(5, 2))
+        # Pill-shaped button defaults — corner_radius=20 for pill aesthetic
+        B = dict(corner_radius=20, height=34, font=ctk.CTkFont(FONT_BODY, 11, weight="bold"))
+        def sep():
+            ctk.CTkFrame(parent, height=1, fg_color=GUI_BORDER, corner_radius=0
+                         ).pack(fill="x", padx=8, pady=6)
+        def lbl(t):
+            ctk.CTkLabel(parent, text=t,
+                font=ctk.CTkFont(FONT_BODY, 9, weight="bold"),
+                text_color=GUI_GRAY).pack(anchor="w", padx=14, pady=(5, 2))
 
         ctk.CTkFrame(parent, height=12, fg_color="transparent").pack()
         lbl("SESIÓN OFICIAL")
         self._lbl_red_name = ctk.CTkLabel(parent, text="🔴 —",
-            font=ctk.CTkFont(size=10), text_color=GUI_RED,
+            font=ctk.CTkFont(FONT_BODY, 10), text_color=GUI_RED,
             wraplength=145, anchor="w", justify="left")
         self._lbl_red_name.pack(anchor="w", padx=14, pady=(0, 1))
         self._lbl_blue_name = ctk.CTkLabel(parent, text="🔵 —",
-            font=ctk.CTkFont(size=10), text_color=GUI_BLUE,
+            font=ctk.CTkFont(FONT_BODY, 10), text_color=GUI_BLUE,
             wraplength=145, anchor="w", justify="left")
         self._lbl_blue_name.pack(anchor="w", padx=14, pady=(0, 2))
+        # Outline-style pill button (inverts on hover)
         ctk.CTkButton(parent, text="＋  NUEVA SESIÓN",
-            fg_color=GUI_PANEL, text_color=GUI_CYAN,
-            border_color=GUI_CYAN, border_width=1,
-            hover_color=GUI_CARD,
+            fg_color="transparent", text_color=GUI_WHITE,
+            border_color=GUI_WHITE, border_width=1,
+            hover_color=GUI_WHITE,
             command=self._cmd_new_session, **B).pack(fill="x", padx=12, pady=2)
 
         sep(); lbl("SESIÓN")
         ctk.CTkButton(parent, text="▶  INICIAR", fg_color=GUI_GREEN,
-            text_color=GUI_BG, hover_color="#28b84e",
+            text_color="#ffffff", hover_color="#166534",
             command=self._cmd_start, **B).pack(fill="x", padx=12, pady=2)
         ctk.CTkButton(parent, text="⏸  PAUSA", fg_color=GUI_YELLOW,
-            text_color=GUI_BG, hover_color="#c0a010",
+            text_color="#ffffff", hover_color="#92400e",
             command=self._cmd_pause, **B).pack(fill="x", padx=12, pady=2)
         ctk.CTkButton(parent, text="⏹  FIN ROUND", fg_color=GUI_RED,
-            text_color=GUI_WHITE, hover_color="#b02020",
+            text_color="#ffffff", hover_color="#991b1b",
             command=self._cmd_end, **B).pack(fill="x", padx=12, pady=2)
 
         sep(); lbl("ROLES")
-        ctk.CTkButton(parent, text="⬜  TEST", fg_color=GUI_PANEL,
+        ctk.CTkButton(parent, text="⬜  TEST", fg_color=GUI_CARD,
             text_color=GUI_WHITE, border_color=GUI_BORDER, border_width=1,
-            hover_color=GUI_CARD, command=self._cmd_test, **B).pack(fill="x", padx=12, pady=2)
-        ctk.CTkButton(parent, text="🔴  ROJO", fg_color="#3a1010",
+            hover_color=GUI_PANEL, command=self._cmd_test, **B).pack(fill="x", padx=12, pady=2)
+        ctk.CTkButton(parent, text="🔴  ROJO", fg_color="#fef2f2",
             text_color=GUI_RED, border_color=GUI_RED, border_width=1,
-            hover_color="#4a1818", command=self._cmd_red, **B).pack(fill="x", padx=12, pady=2)
-        ctk.CTkButton(parent, text="🔵  AZUL", fg_color="#10103a",
+            hover_color="#fee2e2", command=self._cmd_red, **B).pack(fill="x", padx=12, pady=2)
+        ctk.CTkButton(parent, text="🔵  AZUL", fg_color="#eff6ff",
             text_color=GUI_BLUE, border_color=GUI_BLUE, border_width=1,
-            hover_color="#18184a", command=self._cmd_blue, **B).pack(fill="x", padx=12, pady=2)
-        ctk.CTkButton(parent, text="✕  LIMPIAR", fg_color=GUI_PANEL,
+            hover_color="#dbeafe", command=self._cmd_blue, **B).pack(fill="x", padx=12, pady=2)
+        ctk.CTkButton(parent, text="✕  LIMPIAR", fg_color=GUI_CARD,
             text_color=GUI_ORANGE, border_color=GUI_ORANGE, border_width=1,
-            hover_color=GUI_CARD, command=self._cmd_clear, **B).pack(fill="x", padx=12, pady=2)
+            hover_color=GUI_PANEL, command=self._cmd_clear, **B).pack(fill="x", padx=12, pady=2)
 
         sep(); lbl("BASELINE A↔B (m)")
         self._bl_entry = ctk.CTkEntry(parent, placeholder_text="1.50",
-            fg_color=GUI_CARD, border_color=GUI_BORDER, height=32)
+            fg_color=GUI_CARD, border_color=GUI_BORDER, text_color=GUI_WHITE, height=32)
         self._bl_entry.insert(0, str(DEFAULT_BASELINE))
         self._bl_entry.pack(fill="x", padx=12, pady=2)
-        ctk.CTkButton(parent, text="↺  APLICAR", fg_color=GUI_PANEL,
+        ctk.CTkButton(parent, text="↺  APLICAR", fg_color=GUI_CARD,
             text_color=GUI_CYAN, border_color=GUI_CYAN, border_width=1,
-            hover_color=GUI_CARD, command=self._cmd_apply_baseline, **B
+            hover_color=GUI_PANEL, command=self._cmd_apply_baseline, **B
         ).pack(fill="x", padx=12, pady=2)
 
         sep(); lbl("CALIBRACIÓN")
         self._calib_status_lbl = ctk.CTkLabel(parent, text="Sin calibración",
-            font=ctk.CTkFont("Courier New", 9), text_color=GUI_YELLOW,
+            font=ctk.CTkFont(FONT_MONO, 9), text_color=GUI_YELLOW,
             wraplength=145, justify="left")
         self._calib_status_lbl.pack(anchor="w", padx=14, pady=(0, 2))
-        ctk.CTkButton(parent, text="⊞  CALIBRAR", fg_color=GUI_PANEL,
+        ctk.CTkButton(parent, text="⊞  CALIBRAR", fg_color=GUI_CARD,
             text_color=GUI_CYAN, border_color=GUI_CYAN, border_width=1,
-            hover_color=GUI_CARD,
+            hover_color=GUI_PANEL,
             command=self._cmd_calibrate, **B).pack(fill="x", padx=12, pady=2)
-        ctk.CTkButton(parent, text="↺  RECARGAR JSON", fg_color=GUI_PANEL,
+        ctk.CTkButton(parent, text="↺  RECARGAR JSON", fg_color=GUI_CARD,
             text_color=GUI_GRAY, border_color=GUI_BORDER, border_width=1,
-            hover_color=GUI_CARD,
+            hover_color=GUI_PANEL,
             command=self._cmd_reload_calib, **B).pack(fill="x", padx=12, pady=2)
 
         sep()
         self._stereo_lbl = ctk.CTkLabel(parent, text="3D: —/—",
-            font=ctk.CTkFont("Courier New", 12, weight="bold"),
+            font=ctk.CTkFont(FONT_DISPLAY, 12, weight="bold"),
             text_color=GUI_GREEN)
         self._stereo_lbl.pack(padx=14, anchor="w")
         self._status_lbl = ctk.CTkLabel(parent, text="",
-            font=ctk.CTkFont(size=9), text_color=GUI_GRAY,
+            font=ctk.CTkFont(FONT_BODY, 9), text_color=GUI_GRAY,
             wraplength=145, justify="left")
         self._status_lbl.pack(padx=14, anchor="w", pady=(4, 0))
 
+        # Log box — dark accent zone (retained per design system footer pattern)
         sep(); lbl("REGISTRO")
-        self._log_box = ctk.CTkTextbox(parent, fg_color=GUI_CARD,
-            text_color=GUI_GRAY, font=ctk.CTkFont("Courier New", 8),
+        self._log_box = ctk.CTkTextbox(parent, fg_color="#1e1e1e",
+            text_color="#f6f6f699", font=ctk.CTkFont(FONT_MONO, 8),
             wrap="word", corner_radius=6)
         self._log_box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
     def _build_center(self, parent):
         # ── 3 cámaras — zona principal expandible ──────────────────
+        # Asymmetric 12-column grid: primary cam spans 6 cols, secondary 3 each
         cam_row = ctk.CTkFrame(parent, fg_color="transparent")
         cam_row.pack(fill="both", expand=True, padx=4, pady=(4, 2))
+        cam_row.columnconfigure(0, weight=6)
+        cam_row.columnconfigure(1, weight=3)
+        cam_row.columnconfigure(2, weight=3)
+        cam_row.rowconfigure(0, weight=1)
 
         self._cam_lbls = []
         cam_defs = [
-            ("CAM A  ·  PRINCIPAL", GUI_GREEN),
-            ("CAM B  ·  ÁNGULO B",  GUI_MAGENTA),
-            ("CAM C  ·  ÁNGULO C",  GUI_CYAN),
+            ("CAM A  ·  PRINCIPAL", GUI_GREEN,   0),
+            ("CAM B  ·  ÁNGULO B",  GUI_MAGENTA, 1),
+            ("CAM C  ·  ÁNGULO C",  GUI_CYAN,    2),
         ]
-        for title, color in cam_defs:
-            f = ctk.CTkFrame(cam_row, fg_color=GUI_CARD, corner_radius=10)
-            f.pack(side="left", fill="both", expand=True, padx=3)
+        for title, color, col in cam_defs:
+            f = ctk.CTkFrame(cam_row, fg_color=GUI_CARD, corner_radius=8,
+                             border_width=1, border_color=GUI_BORDER)
+            f.grid(row=0, column=col, sticky="nsew", padx=3)
             ctk.CTkLabel(f, text=title,
-                font=ctk.CTkFont(size=9, weight="bold"),
+                font=ctk.CTkFont(FONT_BODY, 9, weight="bold"),
                 text_color=color).pack(pady=(6, 2))
-            lbl = ctk.CTkLabel(f, text="", fg_color=GUI_BLACK)
+            lbl = ctk.CTkLabel(f, text="", fg_color="#111111")
             lbl.pack(fill="both", expand=True, padx=4, pady=(0, 4))
             self._cam_lbls.append(lbl)
 
@@ -1961,11 +1998,11 @@ class FighterIDApp(ctk.CTk):
         info = ctk.CTkFrame(stats_bar, fg_color="transparent", height=32)
         info.pack(fill="x", padx=14, pady=(6, 0)); info.pack_propagate(False)
         ctk.CTkLabel(info, text="Rounds:",
-            font=ctk.CTkFont(size=10), text_color=GUI_GRAY).pack(side="left")
+            font=ctk.CTkFont(FONT_BODY, 10), text_color=GUI_GRAY).pack(side="left")
         self._round_badges = []
         for i in range(TOTAL_ROUNDS):
             b = ctk.CTkLabel(info, text=str(i+1), width=28, height=28,
-                font=ctk.CTkFont("Courier New", 11, weight="bold"),
+                font=ctk.CTkFont(FONT_DISPLAY, 11, weight="bold"),
                 fg_color=GUI_CARD, text_color=GUI_GRAY, corner_radius=14)
             b.pack(side="left", padx=3)
             self._round_badges.append(b)
@@ -1981,7 +2018,7 @@ class FighterIDApp(ctk.CTk):
         f = ctk.CTkFrame(parent, fg_color="transparent")
         f.pack(side="left", fill="both", expand=True)
         ctk.CTkLabel(f, text=f"● {title}",
-            font=ctk.CTkFont(size=11, weight="bold"),
+            font=ctk.CTkFont(FONT_BODY, 11, weight="bold"),
             text_color=color).pack(anchor="w", padx=8, pady=(4, 2))
         grid = ctk.CTkFrame(f, fg_color="transparent"); grid.pack(fill="x", padx=4)
         defs = [
@@ -2001,7 +2038,7 @@ class FighterIDApp(ctk.CTk):
             c.grid(row=i//5, column=i%5, padx=2, pady=2, sticky="ew")
             grid.columnconfigure(i%5, weight=1); cards[k] = c
         tl = ctk.CTkLabel(f, text="",
-            font=ctk.CTkFont("Courier New", 9),
+            font=ctk.CTkFont(FONT_MONO, 9),
             text_color=GUI_GRAY, justify="left")
         tl.pack(anchor="w", padx=10, pady=(2, 4)); cards['_tl'] = tl
         return cards
