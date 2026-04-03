@@ -4,15 +4,30 @@ FighterID Vision v3.3  –  3-Camera GUI Edition
 pip install customtkinter pillow ultralytics opencv-python numpy
 """
 
-import os, subprocess
+import os, subprocess, sys, json
 os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
 os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
 
 import cv2, numpy as np, time, math, datetime, threading
 from collections import deque
+from pathlib import Path
 from ultralytics import YOLO
 import customtkinter as ctk
 from PIL import Image
+
+# ── Calibration tool (opcional — requiere tools/calibrate_cameras.py) ──────
+try:
+    _TOOLS_DIR = str(Path(__file__).parent)
+    if _TOOLS_DIR not in sys.path:
+        sys.path.insert(0, _TOOLS_DIR)
+    from tools.calibrate_cameras import (
+        build_objpoints, detect_corners, draw_overlay,
+        calibrate_single, calibrate_stereo, save_calibration,
+        MIN_CAPTURES, TARGET_CAPTURES, OUTPUT_FILE,
+    )
+    _CALIB_TOOL_OK = True
+except ImportError:
+    _CALIB_TOOL_OK = False
 
 try:
     import torch; torch.set_num_threads(6)
@@ -688,6 +703,24 @@ class VisionEngine(threading.Thread):
         self._stats = {}; self._pids = []
         self._status_msg = "Muestra guantes + torso  |  asigna roles"
         self._log_msgs = deque(maxlen=20)
+
+    def update_calibration(self, raw_json: dict):
+        """Hot-recarga calibración JSON en los StereoFusers sin reiniciar."""
+        stereo = raw_json.get("stereo", {})
+        if "AB" in stereo:
+            ab = stereo["AB"]
+            self.stereo_ab.calib = {
+                "P1": np.array(ab["P1"], dtype=np.float64),
+                "P2": np.array(ab["P2"], dtype=np.float64),
+            }
+            self.stereo_ab.B = float(ab.get("baseline_m", self.stereo_ab.B))
+        if "AC" in stereo:
+            ac = stereo["AC"]
+            self.stereo_ac.calib = {
+                "P1": np.array(ac["P1"], dtype=np.float64),
+                "P2": np.array(ac["P2"], dtype=np.float64),
+            }
+            self.stereo_ac.B = float(ac.get("baseline_m", self.stereo_ac.B))
 
     def _fresh_ts(self):
         return {'fp': 0, 'dv': 0, 'pd': 0, 'hd': 0,
@@ -1369,6 +1402,388 @@ class StatCard(ctk.CTkFrame):
     def set(self, value): self._val.configure(text=str(value))
 
 # ══════════════════════════════════════════════════════════════════
+#  CALIBRATION WIZARD
+# ══════════════════════════════════════════════════════════════════
+class CalibrationWizard(ctk.CTkToplevel):
+    """
+    Asistente paso a paso para calibrar las 3 cámaras desde el dashboard.
+    Fases: A → B → C → Estéreo A-B → Estéreo A-C → Cálculo → Guardado.
+    Los frames se muestran embebidos en el diálogo (sin ventanas OpenCV separadas).
+    """
+    PHASES = ["A", "B", "C", "AB", "AC", "COMPUTE"]
+
+    def __init__(self, parent, engine, on_done=None):
+        super().__init__(parent)
+        self.title("FighterID — Calibración de Cámaras")
+        self.configure(fg_color=GUI_BG)
+        self.geometry("860x600")
+        self.resizable(False, False)
+        self.grab_set()
+
+        self._engine    = engine
+        self._on_done   = on_done
+        self._phase_idx = 0
+        self._rows, self._cols, self._square_m = 6, 9, 0.025
+
+        if _CALIB_TOOL_OK:
+            self._objp = build_objpoints(self._rows, self._cols, self._square_m)
+        else:
+            self._objp = None
+
+        self._img_size = (CAM_W, CAM_H)
+
+        # Almacenamiento de capturas por fase
+        self._captures = {
+            "A":  ([], []),
+            "B":  ([], []),
+            "C":  ([], []),
+            "AB": ([], [], []),   # (objpts, imgpts_a, imgpts_b)
+            "AC": ([], [], []),
+        }
+
+        # Estado del frame actual (actualizado por hilo de fondo)
+        self._last_frame_a   = None
+        self._last_frame_b   = None
+        self._last_found_a   = False
+        self._last_found_b   = False
+        self._last_corners_a = None
+        self._last_corners_b = None
+        self._frame_lock     = threading.Lock()
+        self._running        = True
+
+        self._build_ui()
+        self._update_phase_ui()
+
+        self._poll_thread = threading.Thread(
+            target=self._frame_loop, daemon=True, name="CalibPoll")
+        self._poll_thread.start()
+
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+    # ── UI ─────────────────────────────────────────────────────────
+    def _build_ui(self):
+        ctk.CTkLabel(self, text="CALIBRACIÓN DE CÁMARAS",
+            font=ctk.CTkFont("Courier New", 14, weight="bold"),
+            text_color=GUI_CYAN).pack(pady=(12, 2))
+
+        self._phase_lbl = ctk.CTkLabel(self,
+            text="", font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=GUI_WHITE)
+        self._phase_lbl.pack(pady=(0, 4))
+
+        # Fila de cámaras
+        cam_row = ctk.CTkFrame(self, fg_color="transparent")
+        cam_row.pack(fill="x", padx=12)
+
+        self._cam_lbl_a = ctk.CTkLabel(cam_row, text="Sin señal",
+            fg_color=GUI_BLACK, width=404, height=303,
+            font=ctk.CTkFont(size=10), text_color=GUI_GRAY)
+        self._cam_lbl_a.pack(side="left", padx=(0, 4))
+
+        self._cam_lbl_b = ctk.CTkLabel(cam_row, text="Sin señal",
+            fg_color=GUI_BLACK, width=404, height=303,
+            font=ctk.CTkFont(size=10), text_color=GUI_GRAY)
+        # Solo se muestra en fases estéreo
+
+        # Progreso + estado
+        self._progress_lbl = ctk.CTkLabel(self,
+            text=f"0 / {TARGET_CAPTURES if _CALIB_TOOL_OK else 20} capturas",
+            font=ctk.CTkFont("Courier New", 11), text_color=GUI_GRAY)
+        self._progress_lbl.pack(pady=(6, 0))
+
+        self._status_lbl = ctk.CTkLabel(self, text="",
+            font=ctk.CTkFont(size=10), text_color=GUI_YELLOW,
+            wraplength=820, justify="center")
+        self._status_lbl.pack(pady=(2, 4))
+
+        # Botones
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(pady=8)
+        B = dict(corner_radius=7, height=38,
+                 font=ctk.CTkFont(size=11, weight="bold"), width=190)
+
+        self._capture_btn = ctk.CTkButton(btn_row,
+            text="CAPTURAR  [SPACE]",
+            fg_color=GUI_GREEN, text_color=GUI_BG, hover_color="#28b84e",
+            command=self._cmd_capture, **B)
+        self._capture_btn.pack(side="left", padx=8)
+
+        self._next_btn = ctk.CTkButton(btn_row,
+            text="CONTINUAR  →",
+            fg_color=GUI_PANEL, text_color=GUI_CYAN,
+            border_color=GUI_CYAN, border_width=1,
+            hover_color=GUI_CARD, state="disabled",
+            command=self._cmd_next, **B)
+        self._next_btn.pack(side="left", padx=8)
+
+        self._cancel_btn = ctk.CTkButton(btn_row,
+            text="CANCELAR",
+            fg_color=GUI_PANEL, text_color=GUI_RED,
+            border_color=GUI_RED, border_width=1,
+            hover_color=GUI_CARD,
+            command=self._cancel, **B)
+        self._cancel_btn.pack(side="left", padx=8)
+
+        self.bind("<space>", lambda _e: self._cmd_capture())
+
+    def _update_phase_ui(self):
+        phase = self.PHASES[self._phase_idx]
+        names = {
+            "A":       "Paso 1/5 — Cámara A  (individual)",
+            "B":       "Paso 2/5 — Cámara B  (individual)",
+            "C":       "Paso 3/5 — Cámara C  (individual)",
+            "AB":      "Paso 4/5 — Par estéreo A-B  (simultáneo)",
+            "AC":      "Paso 5/5 — Par estéreo A-C  (simultáneo)",
+            "COMPUTE": "Calculando calibración...",
+        }
+        hints = {
+            "A":  "Mueve el tablero frente a la Cámara A en distintos ángulos y distancias",
+            "B":  "Mueve el tablero frente a la Cámara B en distintos ángulos y distancias",
+            "C":  "Mueve el tablero frente a la Cámara C en distintos ángulos y distancias",
+            "AB": "El tablero debe ser visible en A y B AL MISMO TIEMPO — presiona SPACE para capturar el par",
+            "AC": "El tablero debe ser visible en A y C AL MISMO TIEMPO — presiona SPACE para capturar el par",
+        }
+        target = TARGET_CAPTURES if _CALIB_TOOL_OK else 20
+        self._phase_lbl.configure(text=names.get(phase, phase))
+        self._progress_lbl.configure(text=f"0 / {target} capturas")
+        self._status_lbl.configure(
+            text=hints.get(phase, ""), text_color=GUI_YELLOW)
+        self._next_btn.configure(state="disabled")
+        self._capture_btn.configure(state="normal" if phase != "COMPUTE" else "disabled")
+
+        # Mostrar segunda cámara solo en fases estéreo
+        if phase in ("AB", "AC"):
+            self._cam_lbl_b.pack(side="left")
+        else:
+            self._cam_lbl_b.pack_forget()
+
+    # ── Hilo de polling de frames ───────────────────────────────────
+    def _frame_loop(self):
+        while self._running:
+            try:
+                phase = self.PHASES[self._phase_idx]
+                fa, fb, fc = self._engine.get_frames()
+
+                # Elegir frames según la fase
+                if phase == "A":
+                    fr_a, fr_b = fa, None
+                elif phase == "B":
+                    fr_a, fr_b = fb, None
+                elif phase == "C":
+                    fr_a, fr_b = fc, None
+                elif phase == "AB":
+                    fr_a, fr_b = fa, fb
+                elif phase == "AC":
+                    fr_a, fr_b = fa, fc
+                else:
+                    fr_a, fr_b = fa, None
+
+                label_a = phase if phase in ("A", "B", "C") else phase[0]
+                label_b = phase[1] if len(phase) == 2 else "B"
+
+                # Obtener conteo actual de capturas
+                cap_entry = self._captures.get(phase)
+                count = len(cap_entry[1]) if cap_entry else 0
+
+                disp_a = disp_b = None
+                target = TARGET_CAPTURES if _CALIB_TOOL_OK else 20
+
+                if fr_a is not None and _CALIB_TOOL_OK:
+                    found_a, corners_a, _ = detect_corners(
+                        fr_a, self._rows, self._cols)
+                    disp_a = draw_overlay(fr_a, found_a, corners_a,
+                                          count, target, label_a,
+                                          self._rows, self._cols)
+                    with self._frame_lock:
+                        self._last_frame_a   = fr_a.copy()
+                        self._last_found_a   = found_a
+                        self._last_corners_a = corners_a
+                elif fr_a is not None:
+                    disp_a = fr_a.copy()
+
+                if fr_b is not None and _CALIB_TOOL_OK:
+                    found_b, corners_b, _ = detect_corners(
+                        fr_b, self._rows, self._cols)
+                    disp_b = draw_overlay(fr_b, found_b, corners_b,
+                                          count, target, label_b,
+                                          self._rows, self._cols)
+                    with self._frame_lock:
+                        self._last_frame_b   = fr_b.copy()
+                        self._last_found_b   = found_b
+                        self._last_corners_b = corners_b
+                elif fr_b is not None:
+                    disp_b = fr_b.copy()
+
+                self.after(0, lambda a=disp_a, b=disp_b: self._update_display(a, b))
+            except Exception:
+                pass
+            time.sleep(0.033)
+
+    def _update_display(self, disp_a, disp_b):
+        if disp_a is not None:
+            CalibrationWizard._set_frame(self._cam_lbl_a, disp_a, 404, 303)
+        if disp_b is not None:
+            CalibrationWizard._set_frame(self._cam_lbl_b, disp_b, 404, 303)
+
+    @staticmethod
+    def _set_frame(lbl, bgr, w, h):
+        try:
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            pil = Image.fromarray(rgb).resize((w, h), Image.BILINEAR)
+            img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(w, h))
+            lbl.configure(image=img, text="")
+            lbl._image = img
+        except Exception:
+            pass
+
+    # ── Captura ─────────────────────────────────────────────────────
+    def _cmd_capture(self):
+        if not _CALIB_TOOL_OK:
+            self._status_lbl.configure(
+                text="⚠ tools/calibrate_cameras.py no encontrado",
+                text_color=GUI_RED)
+            return
+        phase = self.PHASES[self._phase_idx]
+        target = TARGET_CAPTURES
+
+        with self._frame_lock:
+            found_a   = self._last_found_a
+            corners_a = self._last_corners_a
+            found_b   = self._last_found_b
+            corners_b = self._last_corners_b
+
+        if phase in ("A", "B", "C"):
+            if not found_a:
+                self._status_lbl.configure(
+                    text="Tablero no detectado — acércalo a la cámara",
+                    text_color=GUI_RED)
+                return
+            obj_list, img_list = self._captures[phase]
+            obj_list.append(self._objp.copy())
+            img_list.append(corners_a.copy())
+            count = len(img_list)
+            self._progress_lbl.configure(
+                text=f"{count} / {target} capturas")
+            self._status_lbl.configure(
+                text=f"✓ Captura #{count} guardada", text_color=GUI_GREEN)
+            if count >= MIN_CAPTURES:
+                self._next_btn.configure(state="normal")
+
+        elif phase in ("AB", "AC"):
+            if not (found_a and found_b):
+                missing = []
+                if not found_a: missing.append(phase[0])
+                if not found_b: missing.append(phase[1])
+                self._status_lbl.configure(
+                    text=f"Tablero no visible en cámara(s): {', '.join(missing)}",
+                    text_color=GUI_RED)
+                return
+            obj_list, img_a_list, img_b_list = self._captures[phase]
+            obj_list.append(self._objp.copy())
+            img_a_list.append(corners_a.copy())
+            img_b_list.append(corners_b.copy())
+            count = len(obj_list)
+            self._progress_lbl.configure(
+                text=f"{count} / {target} pares")
+            self._status_lbl.configure(
+                text=f"✓ Par #{count} guardado", text_color=GUI_GREEN)
+            if count >= MIN_CAPTURES:
+                self._next_btn.configure(state="normal")
+
+    # ── Avance de fase ──────────────────────────────────────────────
+    def _cmd_next(self):
+        self._phase_idx += 1
+        if self._phase_idx >= len(self.PHASES):
+            return
+        phase = self.PHASES[self._phase_idx]
+        if phase == "COMPUTE":
+            self._start_computation()
+        else:
+            self._update_phase_ui()
+
+    # ── Cálculo de calibración (hilo de fondo) ──────────────────────
+    def _start_computation(self):
+        self._capture_btn.configure(state="disabled")
+        self._next_btn.configure(state="disabled")
+        self._phase_lbl.configure(text="Calculando calibración...")
+        self._status_lbl.configure(
+            text="Por favor espera...", text_color=GUI_CYAN)
+        threading.Thread(
+            target=self._run_calibration, daemon=True,
+            name="CalibCompute").start()
+
+    def _run_calibration(self):
+        try:
+            result = {
+                "version": 1,
+                "chessboard": {
+                    "rows": self._rows, "cols": self._cols,
+                    "square_m": self._square_m,
+                },
+                "image_size": list(self._img_size),
+                "cameras": {},
+                "stereo": {},
+            }
+            cam_calibs = {}
+            for label in ("A", "B", "C"):
+                obj_list, img_list = self._captures[label]
+                if len(obj_list) >= MIN_CAPTURES:
+                    cal = calibrate_single(
+                        obj_list, img_list, self._img_size, label)
+                    result["cameras"][label] = cal
+                    cam_calibs[label] = cal
+
+            for la, lb in (("A", "B"), ("A", "C")):
+                key = la + lb
+                obj_list, img_a_list, img_b_list = self._captures[key]
+                if (len(obj_list) >= MIN_CAPTURES
+                        and la in cam_calibs and lb in cam_calibs):
+                    stereo_cal = calibrate_stereo(
+                        obj_list, img_a_list, img_b_list,
+                        self._img_size,
+                        cam_calibs[la], cam_calibs[lb],
+                        la, lb)
+                    result["stereo"][key] = stereo_cal
+
+            save_calibration(result, OUTPUT_FILE)
+            self.after(0, lambda r=result: self._on_done_computation(r))
+
+        except Exception as exc:
+            self.after(0, lambda e=str(exc): self._on_error(e))
+
+    def _on_done_computation(self, result):
+        self._running = False
+        lines = []
+        for cam, d in result.get("cameras", {}).items():
+            q = "OK" if d["rms"] < 1.0 else "POBRE"
+            lines.append(f"Cam {cam}: {d['rms']:.3f}px [{q}]")
+        for pair, d in result.get("stereo", {}).items():
+            q = "OK" if d["rms"] < 1.0 else "POBRE"
+            lines.append(
+                f"Estéreo {pair}: {d['rms']:.3f}px  "
+                f"B={d['baseline_m']:.3f}m [{q}]")
+        summary = "  |  ".join(lines)
+        self._phase_lbl.configure(text="¡Calibración completada!")
+        self._status_lbl.configure(
+            text=f"Guardado → {OUTPUT_FILE}\n{summary}",
+            text_color=GUI_GREEN)
+        self._cancel_btn.configure(text="CERRAR")
+        if self._on_done:
+            self._on_done(result)
+
+    def _on_error(self, msg):
+        self._running = False
+        self._phase_lbl.configure(text="Error en calibración")
+        self._status_lbl.configure(
+            text=f"Error: {msg}", text_color=GUI_RED)
+        self._cancel_btn.configure(text="CERRAR")
+
+    def _cancel(self):
+        self._running = False
+        self.destroy()
+
+
+# ══════════════════════════════════════════════════════════════════
 #  MAIN GUI
 # ══════════════════════════════════════════════════════════════════
 class FighterIDApp(ctk.CTk):
@@ -1488,6 +1903,20 @@ class FighterIDApp(ctk.CTk):
             hover_color=GUI_CARD, command=self._cmd_apply_baseline, **B
         ).pack(fill="x", padx=12, pady=2)
 
+        sep(); lbl("CALIBRACIÓN")
+        self._calib_status_lbl = ctk.CTkLabel(parent, text="Sin calibración",
+            font=ctk.CTkFont("Courier New", 9), text_color=GUI_YELLOW,
+            wraplength=145, justify="left")
+        self._calib_status_lbl.pack(anchor="w", padx=14, pady=(0, 2))
+        ctk.CTkButton(parent, text="⊞  CALIBRAR", fg_color=GUI_PANEL,
+            text_color=GUI_CYAN, border_color=GUI_CYAN, border_width=1,
+            hover_color=GUI_CARD,
+            command=self._cmd_calibrate, **B).pack(fill="x", padx=12, pady=2)
+        ctk.CTkButton(parent, text="↺  RECARGAR JSON", fg_color=GUI_PANEL,
+            text_color=GUI_GRAY, border_color=GUI_BORDER, border_width=1,
+            hover_color=GUI_CARD,
+            command=self._cmd_reload_calib, **B).pack(fill="x", padx=12, pady=2)
+
         sep()
         self._stereo_lbl = ctk.CTkLabel(parent, text="3D: —/—",
             font=ctk.CTkFont("Courier New", 12, weight="bold"),
@@ -1600,6 +2029,15 @@ class FighterIDApp(ctk.CTk):
         self._engine.start()
         self._running = True
         self.after(33, self._update_gui)
+
+        # Mostrar estado de calibración si ya existe el JSON
+        calib_path = Path("camera_calibration.json")
+        if calib_path.exists():
+            try:
+                with open(calib_path) as f:
+                    self._update_calib_status_label(json.load(f))
+            except Exception:
+                pass
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ── Loop GUI @ ~30 fps ─────────────────────────────────────────
@@ -1727,6 +2165,57 @@ class FighterIDApp(ctk.CTk):
             self._engine._log(f"Baseline → {bl:.2f}m")
         except:
             pass
+
+    def _cmd_calibrate(self):
+        if not _CALIB_TOOL_OK:
+            self._top_status.configure(
+                text="⚠ tools/calibrate_cameras.py no encontrado",
+                text_color=GUI_RED)
+            return
+        if not self._engine:
+            self._top_status.configure(
+                text="⚠ Inicia cámaras primero", text_color=GUI_YELLOW)
+            return
+        CalibrationWizard(self, self._engine, on_done=self._on_calib_done)
+
+    def _cmd_reload_calib(self):
+        path = Path("camera_calibration.json")
+        if not path.exists():
+            self._calib_status_lbl.configure(
+                text="No existe JSON", text_color=GUI_RED)
+            return
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            if self._engine:
+                self._engine.update_calibration(data)
+            self._update_calib_status_label(data)
+            self._engine._log("Calibración recargada desde JSON")
+        except Exception as exc:
+            self._calib_status_lbl.configure(
+                text=f"Error: {exc}", text_color=GUI_RED)
+
+    def _on_calib_done(self, data: dict):
+        if self._engine:
+            self._engine.update_calibration(data)
+        self._update_calib_status_label(data)
+        if self._engine:
+            self._engine._log("Calibración aplicada — 3D mejorado")
+
+    def _update_calib_status_label(self, data: dict):
+        cams   = data.get("cameras", {})
+        stereo = data.get("stereo", {})
+        parts  = []
+        for cam, d in cams.items():
+            parts.append(f"{cam}:{d['rms']:.2f}px")
+        ab = stereo.get("AB", {})
+        if ab:
+            parts.append(
+                f"AB:{ab.get('rms', 0):.2f}px  B:{ab.get('baseline_m', 0):.2f}m")
+        text  = "\n".join(parts) if parts else "Cargado"
+        rms   = ab.get("rms", 99)
+        color = GUI_GREEN if rms < 1.0 else GUI_YELLOW if rms < 2.0 else GUI_RED
+        self._calib_status_lbl.configure(text=text, text_color=color)
 
     def _on_close(self):
         self._running = False
