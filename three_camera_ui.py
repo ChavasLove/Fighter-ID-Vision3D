@@ -96,10 +96,10 @@ HUD_BG  = (220, 220, 220)   # Light gray HUD bar (BGR) — matches GUI_PANEL #e8
 HUD_TXT = (17, 17, 17)      # Near-black HUD text (BGR) — matches GUI_PRIMARY #111111
 
 # HSV ranges
-R_LO1=np.array([0,120,70],np.uint8);   R_HI1=np.array([10,255,255],np.uint8)
-R_LO2=np.array([165,120,70],np.uint8); R_HI2=np.array([180,255,255],np.uint8)
-B_LO =np.array([90,100,50],np.uint8);  B_HI =np.array([140,255,255],np.uint8)
-W_S_MAX=55; W_V_MIN=160
+R_LO1=np.array([0,  80,60],np.uint8);  R_HI1=np.array([12,255,255],np.uint8)
+R_LO2=np.array([162,80,60],np.uint8);  R_HI2=np.array([180,255,255],np.uint8)
+B_LO =np.array([88, 70,40],np.uint8);  B_HI =np.array([140,255,255],np.uint8)
+W_S_MAX=60; W_V_MIN=155
 SK1_LO=np.array([0,20,60],np.uint8);   SK1_HI=np.array([25,210,255],np.uint8)
 SK2_LO=np.array([0,10,40],np.uint8);   SK2_HI=np.array([20,130,210],np.uint8)
 
@@ -439,13 +439,13 @@ def glow(img, c, r, col, n=3):
     for i in range(n, 0, -1): cv2.circle(img, c, r + i * 3, col, 1)
     cv2.circle(img, c, r, col, 2)
 
-def classify_glove(frame, x, y, r=38):
+def classify_glove(frame, x, y, r=50):
     h, w = frame.shape[:2]
     roi = frame[max(0, y-r):min(h, y+r), max(0, x-r):min(w, x+r)]
     if roi.size == 0: return {'white': False, 'red': False, 'blue': False}
     small = cv2.resize(roi, (48, 48), interpolation=cv2.INTER_LINEAR)
     hsv = cv2.cvtColor(cv2.GaussianBlur(small, (5, 5), 0), cv2.COLOR_BGR2HSV)
-    s, v = hsv[:, :, 1], hsv[:, :, 2]; mn = max(18, int(48 * 48 * 0.07))
+    s, v = hsv[:, :, 1], hsv[:, :, 2]; mn = max(15, int(48 * 48 * 0.05))
     wm = (s < W_S_MAX) & (v > W_V_MIN); white = int(np.sum(wm)) > mn
     rm = cv2.bitwise_or(cv2.inRange(hsv, R_LO1, R_HI1), cv2.inRange(hsv, R_LO2, R_HI2))
     rm[wm] = 0; red = int(np.sum(rm > 0)) > mn
@@ -832,7 +832,13 @@ class VisionEngine(threading.Thread):
 
     # ── Controles ──────────────────────────────────────────────────
     def cmd_start(self):
-        if not self.roles.ready: return False
+        if not self.roles.ready:
+            # Auto-assign TEST mode if someone is visible but no gloves detected yet
+            if self._pids and self.roles.mode == "none":
+                self.roles.force_test(self._pids[0])
+                self._log("Auto-TEST: iniciando sin guantes detectados")
+            else:
+                return False
         self.session_state = "RUNNING"; self.phase = "ROUND"
         self.rnd = 1; self.rnd_done = 0
         self.t_start = time.time(); self.t_paused = 0.0; self.t_pause = 0.0
