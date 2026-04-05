@@ -1960,7 +1960,7 @@ class FighterIDApp(ctk.CTk):
         # Log box — dark accent zone (retained per design system footer pattern)
         sep(); lbl("REGISTRO")
         self._log_box = ctk.CTkTextbox(parent, fg_color="#1e1e1e",
-            text_color="#f6f6f699", font=ctk.CTkFont(FONT_MONO, 8),
+            text_color="#c8c8c8", font=ctk.CTkFont(FONT_MONO, 8),
             wrap="word", corner_radius=6)
         self._log_box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
