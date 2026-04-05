@@ -280,7 +280,7 @@ class FighterIDAPI:
         try:
             res = (db.table("fighter_profiles")
                      .select("*")
-                     .order("full_name", desc=False)
+                     .order("name", desc=False)
                      .execute())
             return res.data or []
         except Exception as e:
