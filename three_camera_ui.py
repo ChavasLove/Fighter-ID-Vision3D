@@ -92,6 +92,8 @@ BLK=(8,8,12);   WHT=(255,255,255); GRY=(120,120,120)
 RED=(30,30,220); BLU=(255,180,20);  CYN=(230,230,20)
 GRN=(60,230,60); ORG=(0,165,255);   MAG=(220,30,220); YLW=(0,210,230)
 FD=cv2.FONT_HERSHEY_DUPLEX; FS=cv2.FONT_HERSHEY_SIMPLEX
+HUD_BG  = (220, 220, 220)   # Light gray HUD bar (BGR) — matches GUI_PANEL #e8e8e8
+HUD_TXT = (17, 17, 17)      # Near-black HUD text (BGR) — matches GUI_PRIMARY #111111
 
 # HSV ranges
 R_LO1=np.array([0,120,70],np.uint8);   R_HI1=np.array([10,255,255],np.uint8)
@@ -106,8 +108,8 @@ SK2_LO=np.array([0,10,40],np.uint8);   SK2_HI=np.array([20,130,210],np.uint8)
 GUI_BG      = "#f2f2f2"; GUI_PANEL   = "#e8e8e8"; GUI_CARD    = "#ffffff"
 GUI_BORDER  = "#d4d4d4"; GUI_RED     = "#b91c1c"; GUI_BLUE    = "#1d4ed8"
 GUI_CYAN    = "#0e7490"; GUI_GREEN   = "#15803d"; GUI_YELLOW  = "#a16207"
-GUI_MAGENTA = "#7e22ce"; GUI_WHITE   = "#111111"; GUI_GRAY    = "#838282"
-GUI_ORANGE  = "#c2410c"; GUI_BLACK   = "#f2f2f2"
+GUI_MAGENTA = "#7e22ce"; GUI_PRIMARY = "#111111"; GUI_GRAY    = "#838282"
+GUI_ORANGE  = "#c2410c"; GUI_BG_ALT  = "#f2f2f2"; GUI_CAM_BG  = "#111111"
 # Echo layer tokens (#bfbfbf → #d9d9d9)
 GUI_ECHO_1  = "#bfbfbf"; GUI_ECHO_2  = "#c9c9c9"
 GUI_ECHO_3  = "#d1d1d1"; GUI_ECHO_4  = "#d9d9d9"
@@ -715,20 +717,21 @@ class VisionEngine(threading.Thread):
     def update_calibration(self, raw_json: dict):
         """Hot-recarga calibración JSON en los StereoFusers sin reiniciar."""
         stereo = raw_json.get("stereo", {})
-        if "AB" in stereo:
-            ab = stereo["AB"]
-            self.stereo_ab.calib = {
-                "P1": np.array(ab["P1"], dtype=np.float64),
-                "P2": np.array(ab["P2"], dtype=np.float64),
-            }
-            self.stereo_ab.B = float(ab.get("baseline_m", self.stereo_ab.B))
-        if "AC" in stereo:
-            ac = stereo["AC"]
-            self.stereo_ac.calib = {
-                "P1": np.array(ac["P1"], dtype=np.float64),
-                "P2": np.array(ac["P2"], dtype=np.float64),
-            }
-            self.stereo_ac.B = float(ac.get("baseline_m", self.stereo_ac.B))
+        with self._lock:
+            if "AB" in stereo:
+                ab = stereo["AB"]
+                self.stereo_ab.calib = {
+                    "P1": np.array(ab["P1"], dtype=np.float64),
+                    "P2": np.array(ab["P2"], dtype=np.float64),
+                }
+                self.stereo_ab.B = float(ab.get("baseline_m", self.stereo_ab.B))
+            if "AC" in stereo:
+                ac = stereo["AC"]
+                self.stereo_ac.calib = {
+                    "P1": np.array(ac["P1"], dtype=np.float64),
+                    "P2": np.array(ac["P2"], dtype=np.float64),
+                }
+                self.stereo_ac.B = float(ac.get("baseline_m", self.stereo_ac.B))
 
     def _fresh_ts(self):
         return {'fp': 0, 'dv': 0, 'pd': 0, 'hd': 0,
@@ -1189,14 +1192,12 @@ class VisionEngine(threading.Thread):
             mtxt, mc = (("TEST",   MAG) if self.tm else
                         ("FIGHT",  CYN) if self.roles.mode == "fight" else ("DETECT", GRY))
 
-            _HUD_BG  = (220, 220, 220)  # Light gray bar — matches GUI_PANEL (#e8e8e8) in BGR
-            _HUD_TXT = (17, 17, 17)     # Near-black text — matches GUI_WHITE (#111111) in BGR
             def hud(img, label, lc):
-                cv2.rectangle(img, (0, 0), (CAM_W, 58), _HUD_BG, -1)
+                cv2.rectangle(img, (0, 0), (CAM_W, 58), HUD_BG, -1)
                 cv2.line(img, (0, 57), (CAM_W, 57), lc, 2)
                 tstxt = f"{m2:02d}:{s2:02d}"
-                cv2.putText(img, tstxt, (CAM_W//2-52, 44), FD, 1.20, _HUD_BG, 4)
-                cv2.putText(img, tstxt, (CAM_W//2-52, 44), FD, 1.20, _HUD_TXT, 2)
+                cv2.putText(img, tstxt, (CAM_W//2-52, 44), FD, 1.20, HUD_BG, 4)
+                cv2.putText(img, tstxt, (CAM_W//2-52, 44), FD, 1.20, HUD_TXT, 2)
                 cv2.putText(img, label, (10, 38), FS, 0.42, lc, 1)
                 cv2.putText(img, ptxt,  (CAM_W-72, 20), FS, 0.42, pc, 1)
                 cv2.putText(img, mtxt,  (CAM_W-72, 54), FS, 0.42, mc, 1)
@@ -1309,7 +1310,7 @@ class FighterSelectDialog(ctk.CTkToplevel):
         self._rounds_var = ctk.StringVar(value="3")
         for r in ("1", "3", "5"):
             ctk.CTkRadioButton(rnd_row, text=r, variable=self._rounds_var, value=r,
-                fg_color=GUI_CYAN, text_color=GUI_WHITE,
+                fg_color=GUI_CYAN, text_color=GUI_PRIMARY,
                 font=ctk.CTkFont(size=11)).pack(side="left", padx=8)
 
         self._status = ctk.CTkLabel(self,
@@ -1474,12 +1475,12 @@ class CalibrationWizard(ctk.CTkToplevel):
     # ── UI ─────────────────────────────────────────────────────────
     def _build_ui(self):
         ctk.CTkLabel(self, text="CALIBRACIÓN DE CÁMARAS",
-            font=ctk.CTkFont("Courier New", 14, weight="bold"),
+            font=ctk.CTkFont(FONT_DISPLAY, 14, weight="bold"),
             text_color=GUI_CYAN).pack(pady=(12, 2))
 
         self._phase_lbl = ctk.CTkLabel(self,
-            text="", font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=GUI_WHITE)
+            text="", font=ctk.CTkFont(FONT_BODY, 11, weight="bold"),
+            text_color=GUI_PRIMARY)
         self._phase_lbl.pack(pady=(0, 4))
 
         # Fila de cámaras
@@ -1487,23 +1488,23 @@ class CalibrationWizard(ctk.CTkToplevel):
         cam_row.pack(fill="x", padx=12)
 
         self._cam_lbl_a = ctk.CTkLabel(cam_row, text="Sin señal",
-            fg_color=GUI_BLACK, width=404, height=303,
-            font=ctk.CTkFont(size=10), text_color=GUI_GRAY)
+            fg_color=GUI_CAM_BG, width=404, height=303,
+            font=ctk.CTkFont(FONT_BODY, 10), text_color=GUI_GRAY)
         self._cam_lbl_a.pack(side="left", padx=(0, 4))
 
         self._cam_lbl_b = ctk.CTkLabel(cam_row, text="Sin señal",
-            fg_color=GUI_BLACK, width=404, height=303,
-            font=ctk.CTkFont(size=10), text_color=GUI_GRAY)
+            fg_color=GUI_CAM_BG, width=404, height=303,
+            font=ctk.CTkFont(FONT_BODY, 10), text_color=GUI_GRAY)
         # Solo se muestra en fases estéreo
 
         # Progreso + estado
         self._progress_lbl = ctk.CTkLabel(self,
             text=f"0 / {TARGET_CAPTURES if _CALIB_TOOL_OK else 20} capturas",
-            font=ctk.CTkFont("Courier New", 11), text_color=GUI_GRAY)
+            font=ctk.CTkFont(FONT_MONO, 11), text_color=GUI_GRAY)
         self._progress_lbl.pack(pady=(6, 0))
 
         self._status_lbl = ctk.CTkLabel(self, text="",
-            font=ctk.CTkFont(size=10), text_color=GUI_YELLOW,
+            font=ctk.CTkFont(FONT_BODY, 10), text_color=GUI_YELLOW,
             wraplength=820, justify="center")
         self._status_lbl.pack(pady=(2, 4))
 
@@ -1511,7 +1512,7 @@ class CalibrationWizard(ctk.CTkToplevel):
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(pady=8)
         B = dict(corner_radius=7, height=38,
-                 font=ctk.CTkFont(size=11, weight="bold"), width=190)
+                 font=ctk.CTkFont(FONT_BODY, 11, weight="bold"), width=190)
 
         self._capture_btn = ctk.CTkButton(btn_row,
             text="CAPTURAR  [SPACE]",
@@ -1837,7 +1838,7 @@ class FighterIDApp(ctk.CTk):
             ctk.CTkLabel(echo_host, text=_ECHO_TEXT, font=_ECHO_FONT,
                          text_color=col, fg_color="transparent").place(x=4+ox, y=10+oy)
         ctk.CTkLabel(echo_host, text=_ECHO_TEXT, font=_ECHO_FONT,
-                     text_color=GUI_WHITE, fg_color="transparent").place(x=4, y=10)
+                     text_color=GUI_PRIMARY, fg_color="transparent").place(x=4, y=10)
 
         self._top_status = ctk.CTkLabel(top, text="Iniciando...",
             font=ctk.CTkFont(FONT_BODY, 11), text_color=GUI_GRAY)
@@ -1845,11 +1846,11 @@ class FighterIDApp(ctk.CTk):
 
         self._timer_lbl = ctk.CTkLabel(top, text="03:00",
             font=ctk.CTkFont(FONT_DISPLAY, 26, weight="bold"),
-            text_color=GUI_WHITE)
+            text_color=GUI_PRIMARY)
         self._timer_lbl.pack(side="right", padx=24)
 
         self._round_lbl = ctk.CTkLabel(top, text="ROUND 1",
-            font=ctk.CTkFont(FONT_BODY, 13, weight="bold"), text_color=GUI_WHITE)
+            font=ctk.CTkFont(FONT_BODY, 13, weight="bold"), text_color=GUI_PRIMARY)
         self._round_lbl.pack(side="right", padx=4)
 
         self._phase_lbl = ctk.CTkLabel(top, text="IDLE",
@@ -1893,9 +1894,9 @@ class FighterIDApp(ctk.CTk):
         self._lbl_blue_name.pack(anchor="w", padx=14, pady=(0, 2))
         # Outline-style pill button (inverts on hover)
         ctk.CTkButton(parent, text="＋  NUEVA SESIÓN",
-            fg_color="transparent", text_color=GUI_WHITE,
-            border_color=GUI_WHITE, border_width=1,
-            hover_color=GUI_WHITE,
+            fg_color="transparent", text_color=GUI_PRIMARY,
+            border_color=GUI_PRIMARY, border_width=1,
+            hover_color=GUI_PANEL,
             command=self._cmd_new_session, **B).pack(fill="x", padx=12, pady=2)
 
         sep(); lbl("SESIÓN")
@@ -1911,7 +1912,7 @@ class FighterIDApp(ctk.CTk):
 
         sep(); lbl("ROLES")
         ctk.CTkButton(parent, text="⬜  TEST", fg_color=GUI_CARD,
-            text_color=GUI_WHITE, border_color=GUI_BORDER, border_width=1,
+            text_color=GUI_PRIMARY, border_color=GUI_BORDER, border_width=1,
             hover_color=GUI_PANEL, command=self._cmd_test, **B).pack(fill="x", padx=12, pady=2)
         ctk.CTkButton(parent, text="🔴  ROJO", fg_color="#fef2f2",
             text_color=GUI_RED, border_color=GUI_RED, border_width=1,
@@ -1925,7 +1926,7 @@ class FighterIDApp(ctk.CTk):
 
         sep(); lbl("BASELINE A↔B (m)")
         self._bl_entry = ctk.CTkEntry(parent, placeholder_text="1.50",
-            fg_color=GUI_CARD, border_color=GUI_BORDER, text_color=GUI_WHITE, height=32)
+            fg_color=GUI_CARD, border_color=GUI_BORDER, text_color=GUI_PRIMARY, height=32)
         self._bl_entry.insert(0, str(DEFAULT_BASELINE))
         self._bl_entry.pack(fill="x", padx=12, pady=2)
         ctk.CTkButton(parent, text="↺  APLICAR", fg_color=GUI_CARD,
@@ -1987,7 +1988,7 @@ class FighterIDApp(ctk.CTk):
             ctk.CTkLabel(f, text=title,
                 font=ctk.CTkFont(FONT_BODY, 9, weight="bold"),
                 text_color=color).pack(pady=(6, 2))
-            lbl = ctk.CTkLabel(f, text="", fg_color="#111111")
+            lbl = ctk.CTkLabel(f, text="", fg_color=GUI_CAM_BG)
             lbl.pack(fill="both", expand=True, padx=4, pady=(0, 4))
             self._cam_lbls.append(lbl)
 
@@ -2119,10 +2120,10 @@ class FighterIDApp(ctk.CTk):
             rw = stats.get('rnd_winners', {})
             for i, badge in enumerate(self._round_badges):
                 w = rw.get(i + 1)
-                if   w == "red":  badge.configure(fg_color=GUI_RED,  text_color=GUI_WHITE)
-                elif w == "blue": badge.configure(fg_color=GUI_BLUE, text_color=GUI_WHITE)
-                elif w == "test": badge.configure(fg_color=GUI_CYAN, text_color=GUI_BG)
-                elif w == "draw": badge.configure(fg_color=GUI_GRAY, text_color=GUI_WHITE)
+                if   w == "red":  badge.configure(fg_color=GUI_RED,  text_color="#ffffff")
+                elif w == "blue": badge.configure(fg_color=GUI_BLUE, text_color="#ffffff")
+                elif w == "test": badge.configure(fg_color=GUI_CYAN, text_color="#ffffff")
+                elif w == "draw": badge.configure(fg_color=GUI_GRAY, text_color="#ffffff")
                 else:             badge.configure(fg_color=GUI_CARD, text_color=GUI_GRAY)
 
             n3, nt = stats.get('n_3d', 0), max(stats.get('n_kp', 1), 1)
@@ -2199,7 +2200,7 @@ class FighterIDApp(ctk.CTk):
             bl = float(self._bl_entry.get())
             self._engine.stereo_ab.B = max(0.05, bl)
             self._engine.stereo_ac.B = max(0.05, bl * 1.2)
-            self._engine._log(f"Baseline → {bl:.2f}m")
+            self._engine._log_msgs.append(f"Baseline → {bl:.2f}m")
         except:
             pass
 
@@ -2226,8 +2227,8 @@ class FighterIDApp(ctk.CTk):
                 data = json.load(f)
             if self._engine:
                 self._engine.update_calibration(data)
+                self._engine._log_msgs.append("Calibración recargada desde JSON")
             self._update_calib_status_label(data)
-            self._engine._log("Calibración recargada desde JSON")
         except Exception as exc:
             self._calib_status_lbl.configure(
                 text=f"Error: {exc}", text_color=GUI_RED)
@@ -2237,7 +2238,7 @@ class FighterIDApp(ctk.CTk):
             self._engine.update_calibration(data)
         self._update_calib_status_label(data)
         if self._engine:
-            self._engine._log("Calibración aplicada — 3D mejorado")
+            self._engine._log_msgs.append("Calibración aplicada — 3D mejorado")
 
     def _update_calib_status_label(self, data: dict):
         cams   = data.get("cameras", {})
