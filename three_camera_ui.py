@@ -92,8 +92,8 @@ BLK=(8,8,12);   WHT=(255,255,255); GRY=(120,120,120)
 RED=(30,30,220); BLU=(255,180,20);  CYN=(230,230,20)
 GRN=(60,230,60); ORG=(0,165,255);   MAG=(220,30,220); YLW=(0,210,230)
 FD=cv2.FONT_HERSHEY_DUPLEX; FS=cv2.FONT_HERSHEY_SIMPLEX
-HUD_BG  = (220, 220, 220)   # Light gray HUD bar (BGR) — matches GUI_PANEL #e8e8e8
-HUD_TXT = (17, 17, 17)      # Near-black HUD text (BGR) — matches GUI_PRIMARY #111111
+HUD_BG  = (28, 28, 28)      # Dark HUD bar (BGR) — matches GUI_PANEL #1c1c1c
+HUD_TXT = (240, 240, 240)   # Near-white HUD text (BGR) — matches GUI_PRIMARY #f0f0f0
 
 # HSV ranges
 R_LO1=np.array([0,  80,60],np.uint8);  R_HI1=np.array([12,255,255],np.uint8)
@@ -105,14 +105,14 @@ SK2_LO=np.array([0,10,40],np.uint8);   SK2_HI=np.array([20,130,210],np.uint8)
 
 # GUI hex – SOLO para CTk widgets (nunca tuplas BGR)
 # Swiss neutral palette — typography-first design system
-GUI_BG      = "#f2f2f2"; GUI_PANEL   = "#e8e8e8"; GUI_CARD    = "#ffffff"
-GUI_BORDER  = "#d4d4d4"; GUI_RED     = "#b91c1c"; GUI_BLUE    = "#1d4ed8"
-GUI_CYAN    = "#0e7490"; GUI_GREEN   = "#15803d"; GUI_YELLOW  = "#a16207"
-GUI_MAGENTA = "#7e22ce"; GUI_PRIMARY = "#111111"; GUI_GRAY    = "#838282"
-GUI_ORANGE  = "#c2410c"; GUI_BG_ALT  = "#f2f2f2"; GUI_CAM_BG  = "#111111"
-# Echo layer tokens (#bfbfbf → #d9d9d9)
-GUI_ECHO_1  = "#bfbfbf"; GUI_ECHO_2  = "#c9c9c9"
-GUI_ECHO_3  = "#d1d1d1"; GUI_ECHO_4  = "#d9d9d9"
+GUI_BG      = "#111111"; GUI_PANEL   = "#1c1c1c"; GUI_CARD    = "#242424"
+GUI_BORDER  = "#2d2d2d"; GUI_RED     = "#ef4444"; GUI_BLUE    = "#3b82f6"
+GUI_CYAN    = "#22d3ee"; GUI_GREEN   = "#4ade80"; GUI_YELLOW  = "#facc15"
+GUI_MAGENTA = "#c084fc"; GUI_PRIMARY = "#f0f0f0"; GUI_GRAY    = "#888888"
+GUI_ORANGE  = "#fb923c"; GUI_BG_ALT  = "#111111"; GUI_CAM_BG  = "#0a0a0a"
+# Echo layer tokens — dark offsets behind white foreground (#555555 → #2e2e2e)
+GUI_ECHO_1  = "#555555"; GUI_ECHO_2  = "#444444"
+GUI_ECHO_3  = "#383838"; GUI_ECHO_4  = "#2e2e2e"
 # Typography — system font equivalents for Clash Display / Satoshi aesthetic
 FONT_DISPLAY = "Arial Black"   # Bold geometric sans (Clash Display equivalent)
 FONT_BODY    = "Arial"         # Clean functional sans (Satoshi equivalent)
@@ -1807,7 +1807,7 @@ class CalibrationWizard(ctk.CTkToplevel):
 class FighterIDApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        ctk.set_appearance_mode("light")
+        ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         self.title("FighterID Vision v3.3  —  3-Camera Stereo Biomechanics")
         self.configure(fg_color=GUI_BG)
@@ -1907,25 +1907,25 @@ class FighterIDApp(ctk.CTk):
 
         sep(); lbl("SESIÓN")
         ctk.CTkButton(parent, text="▶  INICIAR", fg_color=GUI_GREEN,
-            text_color="#ffffff", hover_color="#166534",
+            text_color="#111111", hover_color="#16a34a",
             command=self._cmd_start, **B).pack(fill="x", padx=12, pady=2)
         ctk.CTkButton(parent, text="⏸  PAUSA", fg_color=GUI_YELLOW,
-            text_color="#ffffff", hover_color="#92400e",
+            text_color="#111111", hover_color="#d97706",
             command=self._cmd_pause, **B).pack(fill="x", padx=12, pady=2)
         ctk.CTkButton(parent, text="⏹  FIN ROUND", fg_color=GUI_RED,
-            text_color="#ffffff", hover_color="#991b1b",
+            text_color="#ffffff", hover_color="#dc2626",
             command=self._cmd_end, **B).pack(fill="x", padx=12, pady=2)
 
         sep(); lbl("ROLES")
         ctk.CTkButton(parent, text="⬜  TEST", fg_color=GUI_CARD,
             text_color=GUI_PRIMARY, border_color=GUI_BORDER, border_width=1,
             hover_color=GUI_PANEL, command=self._cmd_test, **B).pack(fill="x", padx=12, pady=2)
-        ctk.CTkButton(parent, text="🔴  ROJO", fg_color="#fef2f2",
+        ctk.CTkButton(parent, text="🔴  ROJO", fg_color="#2d1515",
             text_color=GUI_RED, border_color=GUI_RED, border_width=1,
-            hover_color="#fee2e2", command=self._cmd_red, **B).pack(fill="x", padx=12, pady=2)
-        ctk.CTkButton(parent, text="🔵  AZUL", fg_color="#eff6ff",
+            hover_color="#3d1a1a", command=self._cmd_red, **B).pack(fill="x", padx=12, pady=2)
+        ctk.CTkButton(parent, text="🔵  AZUL", fg_color="#0f1d3b",
             text_color=GUI_BLUE, border_color=GUI_BLUE, border_width=1,
-            hover_color="#dbeafe", command=self._cmd_blue, **B).pack(fill="x", padx=12, pady=2)
+            hover_color="#152040", command=self._cmd_blue, **B).pack(fill="x", padx=12, pady=2)
         ctk.CTkButton(parent, text="✕  LIMPIAR", fg_color=GUI_CARD,
             text_color=GUI_ORANGE, border_color=GUI_ORANGE, border_width=1,
             hover_color=GUI_PANEL, command=self._cmd_clear, **B).pack(fill="x", padx=12, pady=2)
@@ -1966,7 +1966,7 @@ class FighterIDApp(ctk.CTk):
 
         # Log box — dark accent zone (retained per design system footer pattern)
         sep(); lbl("REGISTRO")
-        self._log_box = ctk.CTkTextbox(parent, fg_color="#1e1e1e",
+        self._log_box = ctk.CTkTextbox(parent, fg_color="#161616",
             text_color="#c8c8c8", font=ctk.CTkFont(FONT_MONO, 8),
             wrap="word", corner_radius=6)
         self._log_box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
