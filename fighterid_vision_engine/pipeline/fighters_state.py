@@ -24,6 +24,7 @@ fighters_state: dict = {
     "RED": {
         "punch_count":    0,
         "total_velocity": 0.0,
+        "max_velocity":   0.0,
         "last_positions": deque(maxlen=100),
         "hits":           0,
         "misses":         0,
@@ -32,6 +33,7 @@ fighters_state: dict = {
     "BLUE": {
         "punch_count":    0,
         "total_velocity": 0.0,
+        "max_velocity":   0.0,
         "last_positions": deque(maxlen=100),
         "hits":           0,
         "misses":         0,
@@ -49,6 +51,7 @@ def reset(start_time: float | None = None) -> None:
         for f in fighters_state.values():
             f["punch_count"]    = 0
             f["total_velocity"] = 0.0
+            f["max_velocity"]   = 0.0
             f["last_positions"].clear()
             f["hits"]           = 0
             f["misses"]         = 0
@@ -84,11 +87,12 @@ def record_strike(fighter_id: str, velocity: float, is_hit: bool) -> None:
         f = fighters_state[fighter_id]
         f["punch_count"]    += 1
         f["total_velocity"] += velocity
+        if velocity > f["max_velocity"]:
+            f["max_velocity"] = velocity
         if is_hit:
             f["hits"]   += 1
         else:
             f["misses"] += 1
-        # XP dentro del lock (evita llamada externa con lock anidado)
         xp_gain = int(velocity * 10)
         f["xp"] += xp_gain
 
@@ -104,6 +108,7 @@ def compute_stats(fighter_id: str) -> dict:
         return {
             "punches":           punches,
             "avg_velocity":      round(f["total_velocity"] / max(punches, 1), 3),
+            "max_velocity":      round(f["max_velocity"], 3),
             "accuracy":          round(f["hits"] / max(punches, 1), 3),
             "frequency_per_min": round(punches / max(elapsed_min, 0.001), 2),
         }
@@ -156,6 +161,7 @@ def build_payload(fight_id: str) -> dict:
                 # Core
                 "punches":           punches,
                 "avg_velocity":      round(f["total_velocity"] / max(punches, 1), 3),
+                "max_velocity":      round(f["max_velocity"], 3),
                 "accuracy":          round(f["hits"] / max(punches, 1), 3),
                 "frequency_per_min": round(punches / max(elapsed_min, 0.001), 2),
                 # Derivados

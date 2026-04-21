@@ -160,6 +160,11 @@ class PersistentTracker:
     def __init__(self):
         self._tracks: dict = {}   # "red"/"blue" → track state
         self._initialized = False
+        self._role_lock   = False  # True once both corners are confirmed
+
+    def lock(self) -> None:
+        """Fija las identidades actuales. Llamar externamente si se quiere forzar el bloqueo."""
+        self._role_lock = True
 
     def assign(self, persons: list,
                frame: "np.ndarray | None" = None) -> dict:
@@ -167,26 +172,34 @@ class PersistentTracker:
         Retorna {"red": person, "blue": person}.
         Puede devolver subconjunto si hay menos de 2 detecciones.
         Cuando se pasa frame, usa color de guantes para la asignación inicial.
+        Una vez que ambas esquinas están asignadas (_role_lock=True) los roles
+        quedan fijos: no se re-inicializa ni se borran tracks perdidos.
         """
         if not persons:
-            # Incrementar frames perdidos de tracks existentes
             for corner in list(self._tracks.keys()):
                 self._tracks[corner]["lost"] += 1
-                if self._tracks[corner]["lost"] > self.MAX_LOST:
+                # Cuando los roles están bloqueados no eliminamos el track —
+                # mantenemos la última posición para re-matching cuando el
+                # luchador reaparezca.
+                if not self._role_lock and self._tracks[corner]["lost"] > self.MAX_LOST:
                     del self._tracks[corner]
             return {}
 
-        # Inicialización: sin tracks previos → color primero, luego posición horizontal
-        if not self._initialized or not self._tracks or not _SCIPY_OK:
+        # Inicialización solo si los roles NO están bloqueados todavía
+        if not self._role_lock and (not self._initialized or not self._tracks or not _SCIPY_OK):
             if frame is not None and persons:
                 result = _color_assign(persons, frame)
                 if result:
                     self._update_tracks_from_assignment(result)
                     self._initialized = True
+                    if "red" in result and "blue" in result:
+                        self._role_lock = True
                     return result
             result = _horizontal_assign(persons)
             self._update_tracks_from_assignment(result)
             self._initialized = True
+            if "red" in result and "blue" in result:
+                self._role_lock = True
             return result
 
         # ── Algoritmo húngaro ────────────────────────────────────────────
@@ -231,12 +244,16 @@ class PersistentTracker:
         if "blue" in result and "red" not in result:
             result["red"] = result.pop("blue")
 
-        # Actualizar tracks y contar frames perdidos
+        # Bloquear roles en cuanto ambas esquinas están asignadas
+        if not self._role_lock and "red" in result and "blue" in result:
+            self._role_lock = True
+
+        # Actualizar tracks; si el rol está bloqueado no borrar tracks perdidos
         self._update_tracks_from_assignment(result)
         for corner in corners:
             if corner not in result:
                 self._tracks[corner]["lost"] += 1
-                if self._tracks[corner]["lost"] > self.MAX_LOST:
+                if not self._role_lock and self._tracks[corner]["lost"] > self.MAX_LOST:
                     del self._tracks[corner]
 
         return result
