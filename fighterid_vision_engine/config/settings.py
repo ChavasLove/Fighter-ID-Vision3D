@@ -121,3 +121,15 @@ FF_EMIT_SCORING_EVENTS = os.getenv("FF_EMIT_SCORING_EVENTS", "true").strip().low
 # ── Buffer de reintentos (eventos que no pudieron enviarse a Supabase) ─
 RETRY_BUFFER_PATH  = os.getenv("RETRY_BUFFER_PATH",  "buffer/pending_events.jsonl")
 RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "5"))
+
+# ── Glove color detection (HSV ranges) ───────────────────────────────
+GLOVE_R_LO1 = (0,   70, 50)   # lower red hue band
+GLOVE_R_HI1 = (15, 255, 255)
+GLOVE_R_LO2 = (160, 70, 50)   # upper red hue band (wraps past 180)
+GLOVE_R_HI2 = (180, 255, 255)
+GLOVE_B_LO  = (85,  60, 30)
+GLOVE_B_HI  = (145, 255, 255)
+GLOVE_W_S_MAX        = 55     # white: low saturation
+GLOVE_W_V_MIN        = 150    # white: high brightness
+GLOVE_COLOR_MIN_FRAC = 0.05   # 5% of ROI pixels must match
+GLOVE_ROI_R          = 50     # sample radius (px) around wrist keypoint

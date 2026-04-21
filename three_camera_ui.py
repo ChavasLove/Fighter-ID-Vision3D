@@ -96,10 +96,10 @@ HUD_BG  = (28, 28, 28)      # Dark HUD bar (BGR) — matches GUI_PANEL #1c1c1c
 HUD_TXT = (240, 240, 240)   # Near-white HUD text (BGR) — matches GUI_PRIMARY #f0f0f0
 
 # HSV ranges
-R_LO1=np.array([0,  80,60],np.uint8);  R_HI1=np.array([12,255,255],np.uint8)
-R_LO2=np.array([162,80,60],np.uint8);  R_HI2=np.array([180,255,255],np.uint8)
-B_LO =np.array([88, 70,40],np.uint8);  B_HI =np.array([140,255,255],np.uint8)
-W_S_MAX=60; W_V_MIN=155
+R_LO1=np.array([0,  70,50],np.uint8);  R_HI1=np.array([15,255,255],np.uint8)
+R_LO2=np.array([160,70,50],np.uint8);  R_HI2=np.array([180,255,255],np.uint8)
+B_LO =np.array([85, 60,30],np.uint8);  B_HI =np.array([145,255,255],np.uint8)
+W_S_MAX=55; W_V_MIN=150
 SK1_LO=np.array([0,20,60],np.uint8);   SK1_HI=np.array([25,210,255],np.uint8)
 SK2_LO=np.array([0,10,40],np.uint8);   SK2_HI=np.array([20,130,210],np.uint8)
 

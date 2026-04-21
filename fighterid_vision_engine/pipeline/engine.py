@@ -489,7 +489,7 @@ class VisionMotorV1:
                 continue
 
             persons = self.detector.infer(frame)
-            roles   = self.tracker.assign(persons)
+            roles   = self.tracker.assign(persons, frame)
 
             # Replay: buffer todo frame antes de procesar
             if self._show:
